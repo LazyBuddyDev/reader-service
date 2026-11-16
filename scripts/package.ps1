@@ -9,11 +9,12 @@ try{
     $final=[IO.Path]::GetFullPath((Join-Path $Destination "$($manifest.id)/$($manifest.version)"))
     $package="$final.pending"
     if((Test-Path -LiteralPath $final) -or (Test-Path -LiteralPath $package)){throw 'Package destination already exists; use a fresh destination.'}
+    # Metadata includes cross-platform dependencies that a Windows build may not cache.
+    $metadata=(& cargo metadata --locked --format-version 1 | ConvertFrom-Json)
+    if($LASTEXITCODE){throw 'Dependency metadata failed.'}
     New-Item -ItemType Directory -Path (Join-Path $package 'bin') -Force | Out-Null
     Copy-Item -LiteralPath target/release/reader-service.exe -Destination (Join-Path $package 'bin')
     Copy-Item -LiteralPath module.json,LICENSE -Destination $package
-    $metadata=(& cargo metadata --locked --offline --format-version 1 | ConvertFrom-Json)
-    if($LASTEXITCODE){throw 'Dependency metadata failed.'}
     $notices=@('# Third-party dependencies','', 'Exact sources are pinned by Cargo.lock. License texts accompany this package.','')
     foreach($dependency in $metadata.packages | Where-Object {$_.source}){
         $notices+="- $($dependency.name) $($dependency.version): $($dependency.license) — $($dependency.repository)"
