@@ -46,3 +46,5 @@ EPUB按spine阅读，使用EPUB3导航或EPUB2 NCX标题。只读取受控归档
 常见错误：`file_unreadable`、`file_too_large`、`encoding_required`、`invalid_text_encoding`、`encrypted_epub`、`fixed_layout_epub`、`unsafe_archive`、`archive_too_large`、`invalid_xml`、`save_failed`、`invalid_saved_data`、`content_version_changed`、`stale_progress`。`removal_cleanup_pending`表示书库引用已移除但文件清理失败，不能当作完整删除成功。索引读取失败保留原文件，保存失败不提交新内存状态。
 
 依赖来源、版本和许可证见Cargo.lock及包内THIRD-PARTY.md。实现依据：[roxmltree解析选项](https://docs.rs/roxmltree/0.20.0/roxmltree/struct.ParsingOptions.html)、[zip归档读取](https://docs.rs/zip/8.6.0/zip/read/struct.ZipArchive.html)、[encoding_rs编码接口](https://docs.rs/encoding_rs/0.8.35/encoding_rs/struct.Encoding.html)。
+
+阅读偏好增加 `page_mode`，取值为 `horizontal`（左右翻页，默认）、`vertical`（上下翻页）或 `scroll`（连续滚动）。旧偏好缺少该字段时使用默认值；非法值拒绝且保留原文件。分页、窗口重排及按需分块衔接由客户端完成，服务仍按96块读取，位置仍使用章节/块/Unicode字符锚点，不保存像素坐标或页码。

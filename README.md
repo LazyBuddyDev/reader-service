@@ -11,6 +11,6 @@ cargo test --locked
 powershell -NoProfile -File scripts/package.ps1 -Destination <绝对包暂存根目录>
 ```
 
-打包输出`<暂存根目录>/reader/0.1.1/`完整包及`target/packages/reader-0.1.1.zip`，包含精确依赖对应的许可文件。已存在的不可变包不覆盖，准备失败的`.pending`目录需核对后清理。测试临时数据在`tmp/`；源码不应作为构建缓存删除。
+打包输出`<暂存根目录>/reader/0.1.2/`完整包及`target/packages/reader-0.1.2.zip`，包含精确依赖对应的许可文件。已存在的不可变包不覆盖，准备失败的`.pending`目录需核对后清理。测试临时数据在`tmp/`；源码不应作为构建缓存删除。
 
 启动前必须设置独立持久目录`LAZYBUDDY_DATA_DIR`，API见[模块API](docs/module-api.md)。协议使用私有stdin/stdout，每行一个JSON；服务不输出日志，不请求网络。宿主拥有服务进程树与生命周期。

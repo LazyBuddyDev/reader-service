@@ -69,12 +69,22 @@ pub struct Entry {
     pub revision: u64,
     pub updated_ms: u64,
 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PageMode {
+    #[default]
+    Horizontal,
+    Vertical,
+    Scroll,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Preferences {
     pub font_size: u32,
     pub line_height: f32,
     pub width: u32,
+    #[serde(default)]
+    pub page_mode: PageMode,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -82,6 +92,7 @@ impl Default for Preferences {
             font_size: 20,
             line_height: 1.9,
             width: 680,
+            page_mode: PageMode::default(),
         }
     }
 }
@@ -143,4 +154,26 @@ pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     #[cfg(not(windows))]
     fs::rename(&temp, path).map_err(|_| "save_failed")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod preference_tests {
+    use super::*;
+    #[test]
+    fn page_mode_defaults_and_validates_the_protocol_boundary() {
+        let old: Preferences =
+            serde_json::from_str(r#"{"font_size":20,"line_height":1.9,"width":680}"#).unwrap();
+        assert_eq!(old.page_mode, PageMode::Horizontal);
+        for mode in ["horizontal", "vertical", "scroll"] {
+            let value =
+                serde_json::json!({"font_size":20,"line_height":1.9,"width":680,"page_mode":mode});
+            let preferences: Preferences = serde_json::from_value(value.clone()).unwrap();
+            assert!(preferences.valid());
+            assert_eq!(
+                serde_json::to_value(preferences).unwrap()["page_mode"],
+                value["page_mode"]
+            );
+        }
+        assert!(serde_json::from_value::<Preferences>(serde_json::json!({"font_size":20,"line_height":1.9,"width":680,"page_mode":"unknown"})).is_err());
+    }
 }
