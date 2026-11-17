@@ -9,8 +9,8 @@ try{
     $final=[IO.Path]::GetFullPath((Join-Path $Destination "$($manifest.id)/$($manifest.version)"))
     $package="$final.pending"
     if((Test-Path -LiteralPath $final) -or (Test-Path -LiteralPath $package)){throw 'Package destination already exists; use a fresh destination.'}
-    # Metadata includes cross-platform dependencies that a Windows build may not cache.
-    $metadata=(& cargo metadata --locked --format-version 1 | ConvertFrom-Json)
+    # Match the Windows package target; other platforms' dependencies are not shipped.
+    $metadata=(& cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-msvc | ConvertFrom-Json)
     if($LASTEXITCODE){throw 'Dependency metadata failed.'}
     New-Item -ItemType Directory -Path (Join-Path $package 'bin') -Force | Out-Null
     Copy-Item -LiteralPath target/release/reader-service.exe -Destination (Join-Path $package 'bin')

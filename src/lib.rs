@@ -1,4 +1,5 @@
 pub mod model;
+mod online;
 pub mod parse;
 use model::*;
 use serde_json::{Value, json};
@@ -17,6 +18,7 @@ pub struct Engine {
     library: Library,
     job: Option<Job>,
     next_job: u64,
+    search: Option<online::Search>,
 }
 struct Job {
     id: u64,
@@ -61,6 +63,7 @@ impl Engine {
             library,
             job: None,
             next_job: 0,
+            search: None,
         })
     }
     fn commit(&mut self, next: Library) -> Result<()> {
@@ -166,6 +169,33 @@ impl Engine {
             return Err("invalid_arguments");
         }
         match method {
+            "online.search" => {
+                if self.search.as_ref().is_some_and(|s| s.running()) {
+                    return Err("search_busy");
+                }
+                let id = self.next_job + 1;
+                let search = online::Search::start(id, &args)?;
+                self.next_job = id;
+                self.search = Some(search);
+                Ok(json!({"job":id,"status":"pending"}))
+            }
+            "online.status" => {
+                let search = self
+                    .search
+                    .as_mut()
+                    .filter(|s| Some(s.id) == args["job"].as_u64())
+                    .ok_or("job_not_found")?;
+                Ok(search.status())
+            }
+            "online.cancel" => {
+                let search = self
+                    .search
+                    .as_ref()
+                    .filter(|s| Some(s.id) == args["job"].as_u64())
+                    .ok_or("job_not_found")?;
+                search.cancel();
+                Ok(json!({}))
+            }
             "health" => Ok(
                 json!({"service":"reader","api_version":1,"capabilities":["local_import","chapters","progress","chapter_search"]}),
             ),
@@ -239,6 +269,11 @@ impl Engine {
             "import.cancel" | "lifecycle.suspend" => {
                 if let Some(job) = &self.job {
                     job.cancel.store(true, Ordering::Release);
+                }
+                if method == "lifecycle.suspend" {
+                    if let Some(search) = &self.search {
+                        search.cancel();
+                    }
                 }
                 Ok(json!({}))
             }
