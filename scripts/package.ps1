@@ -29,7 +29,19 @@ try{
     New-Item -ItemType Directory -Path (Split-Path -Parent $archive) -Force | Out-Null
     # Registry license files may carry pre-1980 timestamps, outside ZIP's supported range.
     Get-ChildItem -LiteralPath $package -Recurse | ForEach-Object {$_.LastWriteTime=[datetime]'2020-01-01T00:00:00'}
-    Compress-Archive -Path (Join-Path $package '*') -DestinationPath $archive
+    # Compress-Archive on Windows PowerShell emits backslashes rejected by safe ZIP readers.
+    Add-Type -AssemblyName System.IO.Compression,System.IO.Compression.FileSystem
+    $zip=[IO.Compression.ZipFile]::Open($archive,[IO.Compression.ZipArchiveMode]::Create)
+    try{
+        foreach($file in Get-ChildItem -LiteralPath $package -Recurse -File){
+            $relative=$file.FullName.Substring($package.Length+1).Replace('\','/')
+            [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,$file.FullName,$relative,[IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    }finally{$zip.Dispose()}
+    $check=[IO.Compression.ZipFile]::OpenRead($archive)
+    try{
+        foreach($entry in $check.Entries){if($entry.FullName.Contains('\')){throw 'Package ZIP must use forward-slash paths.'}}
+    }finally{$check.Dispose()}
     Move-Item -LiteralPath $package -Destination $final
     Get-FileHash -Algorithm SHA256 -LiteralPath $archive
     Write-Host "Prepared complete reader module: $final"
