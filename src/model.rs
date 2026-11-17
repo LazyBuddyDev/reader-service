@@ -27,6 +27,8 @@ pub struct Book {
     pub id: String,
     pub title: String,
     pub author: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
     pub source: Source,
     pub content_version: String,
     pub chapters: Vec<Chapter>,

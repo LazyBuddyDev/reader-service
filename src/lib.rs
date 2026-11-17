@@ -84,6 +84,9 @@ impl Engine {
         read_json(&self.directory(id)?.join("book.json"), 4 * 1024 * 1024)
     }
     fn chapter_meta<'a>(&self, book: &'a Book, chapter: &str) -> Result<&'a Chapter> {
+        if book.source.kind == "fanqie" {
+            return Err("source_body_unavailable");
+        }
         let n = index(chapter, "c")?;
         book.chapters
             .get(n)
@@ -91,6 +94,9 @@ impl Engine {
             .ok_or("chapter_not_found")
     }
     fn page(&self, book: &Book, chapter: &str, start: usize) -> Result<Vec<Block>> {
+        if book.source.kind == "fanqie" {
+            return Err("source_body_unavailable");
+        }
         let meta = self.chapter_meta(book, chapter)?;
         if start >= meta.blocks || start % PAGE_BLOCKS != 0 {
             return Err("invalid_position");
@@ -123,7 +129,9 @@ impl Engine {
         fs::create_dir(&stage).map_err(|_| "save_failed")?;
         let result = (|| {
             atomic_json(&stage.join("book.json"), book)?;
-            fs::write(stage.join("source.bin"), parsed.original).map_err(|_| "save_failed")?;
+            if book.source.kind == "local" {
+                fs::write(stage.join("source.bin"), parsed.original).map_err(|_| "save_failed")?;
+            }
             for (i, blocks) in parsed.chapters.iter().enumerate() {
                 let chapter = stage.join(format!("c{i}"));
                 fs::create_dir(&chapter).map_err(|_| "save_failed")?;
@@ -164,11 +172,85 @@ impl Engine {
         }
         result
     }
+    fn add_online(&mut self, detail: Value) -> Result<Value> {
+        // This snapshot comes only from the completed, validated source worker.
+        let source_id = detail["id"].as_str().ok_or("invalid_source_response")?;
+        let id = format!(
+            "book-{}",
+            &hash(format!("fanqie:{source_id}").as_bytes())[..24]
+        );
+        let chapters = detail["chapters"]
+            .as_array()
+            .ok_or("invalid_source_response")?
+            .iter()
+            .map(|c| {
+                Ok(Chapter {
+                    id: c["id"]
+                        .as_str()
+                        .ok_or("invalid_source_response")?
+                        .to_owned(),
+                    title: c["title"]
+                        .as_str()
+                        .ok_or("invalid_source_response")?
+                        .to_owned(),
+                    blocks: 0,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let book = Book {
+            id,
+            title: detail["title"]
+                .as_str()
+                .ok_or("invalid_source_response")?
+                .to_owned(),
+            author: detail["author"].as_str().unwrap_or("").to_owned(),
+            description: detail["description"].as_str().unwrap_or("").to_owned(),
+            source: Source {
+                kind: "fanqie".into(),
+                id: source_id.into(),
+                format: "online".into(),
+                encoding: String::new(),
+            },
+            content_version: format!(
+                "catalog-{}",
+                hash(&serde_json::to_vec(&chapters).map_err(|_| "save_failed")?)
+            ),
+            chapters,
+            resources: Default::default(),
+            warnings: vec![],
+        };
+        self.import(parse::Parsed {
+            book,
+            chapters: vec![],
+            resources: Default::default(),
+            original: vec![],
+        })
+    }
     pub fn call(&mut self, method: &str, args: Value) -> Result<Value> {
         if !args.is_object() {
             return Err("invalid_arguments");
         }
         match method {
+            "library.add" => {
+                if args["source"] != "fanqie" {
+                    return Err("unsupported_source");
+                }
+                let source_id = string(&args, "book_id")?;
+                if let Some(existing) = self
+                    .library
+                    .entries
+                    .iter()
+                    .find(|e| e.source.kind == "fanqie" && e.source.id == source_id)
+                {
+                    return Ok(json!({"book":existing,"duplicate":true}));
+                }
+                let detail = self
+                    .search
+                    .as_ref()
+                    .ok_or("source_detail_required")?
+                    .detail_result(source_id)?;
+                self.add_online(detail)
+            }
             "online.search" | "online.detail" => {
                 if self.search.as_ref().is_some_and(|s| s.running()) {
                     return Err("search_busy");
@@ -201,7 +283,7 @@ impl Engine {
                 Ok(json!({}))
             }
             "health" => Ok(
-                json!({"service":"reader","api_version":1,"capabilities":["local_import","chapters","progress","chapter_search","online_search","online_details"]}),
+                json!({"service":"reader","api_version":1,"capabilities":["local_import","chapters","progress","chapter_search","online_search","online_details","online_shelf"]}),
             ),
             "library.list" => {
                 let start = args["start"].as_u64().unwrap_or(0) as usize;

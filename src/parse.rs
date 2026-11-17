@@ -73,6 +73,7 @@ fn finish(
     }
     Ok(Parsed {
         book: Book {
+            description: String::new(),
             id: format!("book-{}", &content_version[..24]),
             title: title.chars().take(300).collect(),
             author,

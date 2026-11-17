@@ -1,4 +1,4 @@
-//! Anonymous official App metadata search only; no device registration or verification bypass.
+//! Official metadata adapters; no device registration or verification bypass.
 use crate::model::Result;
 use serde_json::{Value, json};
 use std::{
@@ -68,6 +68,14 @@ impl Search {
     }
     pub fn running(&self) -> bool {
         self.worker.as_ref().is_some_and(|w| !w.is_finished())
+    }
+    pub fn detail_result(&self, book_id: &str) -> Result<Value> {
+        self.result
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .filter(|v| v["source"] == "fanqie" && v["id"] == book_id && v["chapters"].is_array())
+            .cloned()
+            .ok_or("source_detail_required")
     }
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
@@ -515,10 +523,87 @@ mod tests {
         };
         search.cancel();
         assert!(search.running());
+        assert_eq!(search.detail_result("123"), Err("source_detail_required"));
         assert_eq!(search.status()["status"], "cancelled");
         release.send(()).unwrap();
         search.worker.take().unwrap().join().unwrap().unwrap();
         assert_eq!(search.status()["status"], "cancelled");
+    }
+    #[test]
+    fn shelf_uses_verified_source_identity_and_survives_restart_and_failed_save() {
+        use std::fs;
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tmp")
+            .join(format!("shelf-test-{}", std::process::id()));
+        let mut engine = crate::Engine::open(root.clone()).unwrap();
+        let args = json!({"source":"fanqie","book_id":"123"});
+        assert_eq!(
+            engine.call("library.add", args.clone()),
+            Err("source_detail_required")
+        );
+        let detail = json!({"source":"fanqie","id":"123","title":"同名书","author":"作者","description":"简介","chapters":[{"id":"456","title":"第一章"}]});
+        engine.search = Some(Search {
+            id: 1,
+            cancel: Arc::new(AtomicBool::new(false)),
+            worker: None,
+            result: Some(Ok(detail.clone())),
+        });
+        assert_eq!(
+            engine.call("library.add", json!({"source":"fanqie","book_id":"124"})),
+            Err("source_detail_required")
+        );
+        engine.call("lifecycle.suspend", json!({})).unwrap();
+        let first = engine.call("library.add", args.clone()).unwrap();
+        assert_eq!(first["duplicate"], false);
+        let id = first["book"]["id"].as_str().unwrap().to_owned();
+        assert!(!root.join("books").join(&id).join("source.bin").exists());
+        drop(engine);
+        let mut engine = crate::Engine::open(root.clone()).unwrap();
+        assert_eq!(
+            engine.call("library.add", args.clone()).unwrap()["duplicate"],
+            true
+        );
+        let book = engine.call("book.open", json!({"book_id":id})).unwrap();
+        assert_eq!(book["book"]["chapters"][0]["id"], "456");
+        assert_eq!(book["book"]["description"], "简介");
+        assert_eq!(
+            engine.call("chapter.read", json!({"book_id":id,"chapter_id":"456"})),
+            Err("source_body_unavailable")
+        );
+        let mut other = detail.clone();
+        other["id"] = json!("124");
+        engine.search = Some(Search {
+            id: 2,
+            cancel: Arc::new(AtomicBool::new(false)),
+            worker: None,
+            result: Some(Ok(other)),
+        });
+        fs::rename(root.join("library.json"), root.join("library.saved")).unwrap();
+        fs::create_dir(root.join("library.json")).unwrap();
+        let second_args = json!({"source":"fanqie","book_id":"124"});
+        assert_eq!(
+            engine.call("library.add", second_args.clone()),
+            Err("save_failed")
+        );
+        assert_eq!(engine.call("library.list", json!({})).unwrap()["total"], 1);
+        fs::remove_dir(root.join("library.json")).unwrap();
+        fs::rename(root.join("library.saved"), root.join("library.json")).unwrap();
+        let second = engine.call("library.add", second_args).unwrap();
+        assert_ne!(first["book"]["id"], second["book"]["id"]);
+        assert_eq!(engine.call("library.list", json!({})).unwrap()["total"], 2);
+        engine
+            .call("library.remove", json!({"book_id":id}))
+            .unwrap();
+        assert!(!root.join("books").join(&id).exists());
+        drop(engine);
+        let mut engine = crate::Engine::open(root.clone()).unwrap();
+        assert_eq!(engine.call("library.list", json!({})).unwrap()["total"], 1);
+        assert_eq!(
+            engine.call("library.add", args),
+            Err("source_detail_required")
+        );
+        drop(engine);
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn engine_suspend_cancels_search_and_old_job_cannot_cancel_current_job() {

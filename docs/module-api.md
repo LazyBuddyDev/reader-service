@@ -6,7 +6,7 @@ API v1，JSON Lines私有持久会话。请求`{version:1,id:"...",method:"...",
 
 服务数据根目录由`LAZYBUDDY_DATA_DIR`显式传入。`library.json`保存书库和偏好，`books/<book_id>/`保存书籍元数据、原文件副本`source.bin`、按每96块分文件保存的章节JSON及白名单图片。导入后原文件移动或删除不影响阅读；移除只处理受管理副本，绝不删除导入源。
 
-书库条目`Entry`具有独立`id`，以及`source:{kind:"local",id:<文件SHA256>,format,encoding}`和`content_version`。内容版本由原文件标识、实际解码方式与内容模型版本生成。相同内容/解码重复导入返回已有条目；不同内容或不同解码不按同名覆盖。未来在线来源须使用独立来源标识与经过确认的章节映射，不自动合并同名书籍。
+书库条目`Entry`具有独立`id`，以及`source:{kind:"local",id:<文件SHA256>,format,encoding}`和`content_version`。内容版本由原文件标识、实际解码方式与内容模型版本生成。相同内容/解码重复导入返回已有条目；不同内容或不同解码不按同名覆盖。在线书籍使用来源类型和来源书籍ID去重，不自动合并同名书籍。
 
 书籍`Book`含`id,title,author,source,content_version,chapters,resources,warnings`。章节`{id,title,blocks}`严格按解析后的阅读顺序排列；EPUB嵌套导航为每个spine资源提供首个有效标题，目录当前平铺为阅读章节，不保留完整多级导航树。
 
@@ -59,7 +59,7 @@ API v1，JSON Lines私有持久会话。请求`{version:1,id:"...",method:"...",
 
 `health.capabilities`包含`online_details`。`online.detail {source:"fanqie",book_id}`返回`{job,status:"pending"}`，复用`online.status`及`online.cancel`。搜索与详情共用一个真实在途任务；切换、挂起或退出不派生后续请求，取消后迟到结果不可交付。标识为1–24位ASCII数字字符串，传给固定URL前验证，不接受任意URL。
 
-完成结果为`{source:"fanqie",id,title,author,description,chapters:[{id,title}]}`。字段中的ID均为来源ID，不转换成宿主本地书籍ID；尚未保存为书架或内容版本。只返回白名单元数据，不返回封面、账号、上游签名或网页锁定字段；网页锁定状态不能代替App章节权限。
+完成结果为`{source:"fanqie",id,title,author,description,chapters:[{id,title}]}`。字段中的ID均为来源ID，不转换成宿主本地书籍ID；详情本身不写书架；用户明确加入时按下节持久化目录快照。只返回白名单元数据，不返回封面、账号、上游签名或网页锁定字段；网页锁定状态不能代替App章节权限。
 
 详情只请求`https://fanqienovel.com/page/<book_id>`官方公开页面。真实验证已读回《惊鸿》的4423章完整目录。使用与搜索相同的NativeTls、系统代理及有界超时；响应上限4MiB。只通过serde_json解析`window.__INITIAL_STATE__`赋值中的第一个JSON值，不执行网页JavaScript或请求其资源。书籍ID必须匹配请求；标题、作者和简介的上限与搜索一致，目录最多10000章，章节ID唯一并保留服务端卷序/章序；实际章数必须等于声明总数。缺失章节返回`incomplete_source_directory`，结构错误或重复ID返回`invalid_source_response`，不能当作空目录。
 
@@ -80,3 +80,13 @@ EPUB按spine阅读，使用EPUB3导航或EPUB2 NCX标题。只读取受控归档
 依赖来源、版本和许可证见Cargo.lock及包内THIRD-PARTY.md。实现依据：[roxmltree解析选项](https://docs.rs/roxmltree/0.20.0/roxmltree/struct.ParsingOptions.html)、[zip归档读取](https://docs.rs/zip/8.6.0/zip/read/struct.ZipArchive.html)、[encoding_rs编码接口](https://docs.rs/encoding_rs/0.8.35/encoding_rs/struct.Encoding.html)。
 
 阅读偏好增加 `page_mode`，取值为 `horizontal`（左右翻页，默认）、`vertical`（上下翻页）或 `scroll`（连续滚动）。旧偏好缺少该字段时使用默认值；非法值拒绝且保留原文件。分页、窗口重排及按需分块衔接由客户端完成，服务仍按96块读取，位置仍使用章节/块/Unicode字符锚点，不保存像素坐标或页码。
+
+## 在线书架
+
+`health.capabilities`包含`online_shelf`。`library.add {source:"fanqie",book_id}` → `{book:<Entry>,duplicate}`，只持久化本应用书架，不写官方账号收藏。新的条目只能来自当前服务已完成、已读回且ID匹配的`online.detail`结果；不接受客户端提交标题、目录、正文或URL。缺少匹配快照返回`source_detail_required`，客户端需重新载入目录。已在书架的相同来源ID直接返回已有条目，不覆盖快照、进度或更新时间；不同来源ID即使同名也分别保存。
+
+复用现有原子书库提交、最多5000本限制及移除流程。条目source为`{kind:"fanqie",id:<来源书籍ID>,format:"online",encoding:""}`；本地ID由来源类型和来源ID生成稳定哈希。`book.open`返回已保存的简介及完整有序目录，无网络请求；新增`Book.description`为可选字段，旧本地书籍缺省为空。目录章节ID保留来源ID，`blocks:0`表示尚无正文，`catalog-<hash>`仅标识目录快照，不声称是已验证的正文版本。
+
+书架保存不下载正文、不创建空原文件或章节文件。当前没有`online_body`能力；对在线书籍调用正文/查找/位置保存会返回`source_body_unavailable`，不能用空正文冒充读取成功。宿主从在线详情加入书架，确认提交后显示“已在书架”；书架中的在线条目打开本地目录，并明确提示正文暂不可用。重复加入禁用，保存失败保留目录和原书架，可由用户明确重试。离页后的写入结果不更新旧视图，再进入时只读核对书架；恢复不会重复提交。
+
+正文接入仍须核验正常App客户端及其会话、章节权限和响应，公开目录成功不能外推正文成功。未加入设备轮换、版本降级或第三方正文代理；未实现官方云端书架、目录更新、未读/追更或正文缓存。
