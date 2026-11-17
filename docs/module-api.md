@@ -19,13 +19,14 @@ API v1，JSON Lines私有持久会话。请求`{version:1,id:"...",method:"...",
 | 方法 | 参数与结果 |
 | --- | --- |
 | `health` | `{}` → service、api_version、当前能力列表 |
-| `library.list` | `{start?:0,limit?:100}` → `{entries,total,last_book}`；limit最多100 |
+| `library.list` | `{start?:0,limit?:100}` → `{entries,total,last_book}`；仅返回在书架中的条目，过滤后分页，limit最多100 |
 | `library.import` | `{path:<用户选择的绝对路径>,encoding?:"auto"}` → `{job,status:"pending"}`；一次一个导入任务 |
 | `import.status` | `{job}` → pending / cancelled / failed（error为错误码）/ complete（result含book、duplicate、warnings） |
 | `import.cancel` | `{}` → `{}`；请求取消，尚未提交的内容不进入书库 |
 | `lifecycle.suspend` | `{}` → `{}`；取消正在解析的导入，不启动后续任务 |
 | `library.remove` | `{book_id}` → `{}`；先原子移除书库引用，再清理副本 |
-| `book.open` | `{book_id}` → `{book,position,revision}` |
+| `book.open` | `{book_id}` → `{book,position,revision,in_shelf}` |
+| `library.favorite` | `{book_id,in_shelf:<bool>}` → `{book:<Entry>}`；原子切换本应用书架状态，保留副本、目录及进度 |
 | `chapter.read` | `{book_id,chapter_id,start?:0}` → `{blocks,start,total}`；每次最多96块，start必须是96的倍数 |
 | `chapter.find` | `{book_id,chapter_id,query,start?:0}` → `{match:null或{index,block_id,offset}}`；首个命中，query最多200字符 |
 | `resource.read` | `{book_id,resource_id}` → `{url:<受限图片data URL>}`；由可见客户端按需请求 |
@@ -87,7 +88,7 @@ EPUB按spine阅读，使用EPUB3导航或EPUB2 NCX标题。只读取受控归档
 
 复用现有原子书库提交、最多5000本限制及移除流程。条目source为`{kind:"fanqie",id:<来源书籍ID>,format:"online",encoding:""}`；本地ID由来源类型和来源ID生成稳定哈希。`book.open`返回已保存的简介及完整有序目录，无网络请求；新增`Book.description`为可选字段，旧本地书籍缺省为空。目录章节ID保留来源ID，`blocks:0`表示尚无正文，`catalog-<hash>`仅标识目录快照，不声称是已验证的正文版本。
 
-书架保存不下载正文、不创建空原文件或章节文件。`online_body`能力及按需正文协议见下节；章节未准备时返回`chapter_not_loaded`，不能把空正文冒充读取成功。宿主从在线详情加入书架，确认提交后显示“已在书架”；支持正文的宿主从书架条目直接恢复阅读，也可在在线详情的已入架目录中选择章节。重复加入禁用，保存失败保留目录和原书架，可由用户明确重试。离页后的写入结果不更新旧视图，再进入时只读核对书架；恢复不会重复提交。
+书架保存不下载正文、不创建空原文件或章节文件。`online_body`能力及按需正文协议见下节；章节未准备时返回`chapter_not_loaded`，不能把空正文冒充读取成功。宿主从在线详情星标加入或移出书架，确认提交后更新星标；支持正文的宿主可从书架条目恢复阅读，也可在在线详情选择章节直接阅读，首次阅读不自动收藏。写入期间禁重复操作，保存失败保留目录和原书架，可由用户明确重试。离页后的写入结果不更新旧视图，再进入时只读核对书架；恢复不会重复提交。
 
 正文已验证《惊鸿》首章和第11章，后续章节权限和稳定性仍需继续核验，公开目录成功不能外推正文成功。未加入设备轮换、版本降级或第三方正文代理；未实现官方云端书架、目录更新、未读/追更或正文缓存。
 
@@ -119,7 +120,7 @@ EPUB按spine阅读，使用EPUB3导航或EPUB2 NCX标题。只读取受控归档
 
 ## 按需在线正文
 
-`health.capabilities`包含`online_body`。`online.chapter {book_id:<受管理书架ID>,chapter_id:<来源章节ID>}`仅接受本应用已入架且目录中存在的番茄章节。已在内存中时直接返回`{status:"complete",result:{book_id,chapter_id,chapter_version,total}}`；否则返回`{job,status:"pending"}`并通过既有`online.status`读回相同result。搜索、详情和正文共用一个实际在途任务；正文准备完成只交付章节元数据，随后复用`chapter.read`、`chapter.find`读取/检索正文块，不一次向界面交付整本书。
+`health.capabilities`包含`online_body`。`online.chapter {book_id:<受管理书籍ID>,chapter_id:<来源章节ID>}`仅接受本应用已保存且目录中存在的番茄章节。已在内存中时直接返回`{status:"complete",result:{book_id,chapter_id,chapter_version,total}}`；否则返回`{job,status:"pending"}`并通过既有`online.status`读回相同result。搜索、详情和正文共用一个实际在途任务；正文准备完成只交付章节元数据，随后复用`chapter.read`、`chapter.find`读取/检索正文块，不一次向界面交付整本书。
 
 `chapter.read`对在线章节增加`chapter_version`，本地章节为null。在线`Position`增加可选`chapter_version`，由当前规范化章节块计算SHA256；`content_version`继续表示保存的目录快照，两者不能互相代替。在线进度必须匹配实际已准备的章节版本，旧正文锚点返回`content_version_changed`；宿主重新打开后核对版本，有变化则回到本章开头。字符偏移仍为Unicode标量值，不能按字节或像素存储。旧本地位置无需该字段，保持兼容。
 
@@ -132,3 +133,7 @@ EPUB按spine阅读，使用EPUB3导航或EPUB2 NCX标题。只读取受控归档
 完整0.1.9包在独立数据目录下验证《惊鸿》4423章入架后首章101块、第11章124块、分块/章内查找、同一身份和密钥的进程重启复用、位置恢复、旧正文版本拒绝及无正文文件落盘。单测另覆盖取消后不接受迟到正文、缓存上限和Job退出；界面样例覆盖加入后阅读、失败保留、设置切换及迟到隔离。真实服务、样例界面、实机联合验收分开报告，不外推全书、账号或长期稳定性。
 
 模块包含辅助程序对应源码`sources/fanqie-helper-0.1.0.zip`及精确依赖许可；MPL依赖同时携带已发布的源码包。许可遗漏的补充来源见根`licenses/README.md`及辅助程序README，构建不从未固定分支下载代码。正式发布仍须按独立发布授权执行。
+
+## 书架状态与直接阅读
+
+`health.capabilities`中的`shelf_membership`表示支持独立书架状态。Entry的`in_shelf`持久化；旧索引缺省为true，沿用原书架。`online.open {source:"fanqie",book_id}`与`library.add`复用已验证详情保存逻辑，首次保存不加入书架；再次打开已有条目不改变书架状态。`library.add`和重复导入本地文件会重新加入已移出条目，保留原有进度。`library.favorite`只切换本应用书架状态，不写官方账号收藏；失败不提交内存，重复相同状态不写文件。移出后正文读取和位置保存仍可继续。`library.remove`仍是物理删除副本及记录的显式接口，不用于星标切换。

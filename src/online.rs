@@ -670,6 +670,76 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn reading_without_membership_and_favorite_changes_preserve_progress() {
+        use std::fs;
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tmp")
+            .join(format!("membership-test-{}", std::process::id()));
+        let mut engine = crate::Engine::open(root.clone()).unwrap();
+        let detail = json!({"source":"fanqie","id":"123","title":"未收藏阅读","author":"作者","description":"简介","chapters":[{"id":"456","title":"第一章"}]});
+        engine.search = Some(Search {
+            id: 1,
+            cancel: Arc::new(AtomicBool::new(false)),
+            worker: None,
+            result: Some(Ok(detail)),
+        });
+        let args = json!({"source":"fanqie","book_id":"123"});
+        let opened = engine.call("online.open", args.clone()).unwrap();
+        let id = opened["book"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(opened["book"]["in_shelf"], false);
+        assert_eq!(engine.call("library.list", json!({})).unwrap()["total"], 0);
+        engine.body.remember(json!({"book_id":id,"chapter_id":"456","chapter_version":"v1","blocks":crate::parse::online_html("<p>甲😀乙</p>").unwrap()})).unwrap();
+        let position = json!({"book_id":id,"content_version":opened["book"]["content_version"],"chapter_id":"456","block_id":"b0","offset":2,"chapter_version":"v1"});
+        engine
+            .call("progress.save", json!({"position":position,"revision":1}))
+            .unwrap();
+        engine
+            .call("library.favorite", json!({"book_id":id,"in_shelf":true}))
+            .unwrap();
+        assert_eq!(engine.call("library.list", json!({})).unwrap()["total"], 1);
+        engine
+            .call("library.favorite", json!({"book_id":id,"in_shelf":false}))
+            .unwrap();
+        assert_eq!(engine.call("library.list", json!({})).unwrap()["total"], 0);
+        assert_eq!(
+            engine
+                .call("chapter.read", json!({"book_id":id,"chapter_id":"456"}))
+                .unwrap()["blocks"][0]["text"],
+            "甲😀乙"
+        );
+        fs::rename(root.join("library.json"), root.join("library.saved")).unwrap();
+        fs::create_dir(root.join("library.json")).unwrap();
+        assert_eq!(
+            engine.call("library.favorite", json!({"book_id":id,"in_shelf":true})),
+            Err("save_failed")
+        );
+        assert_eq!(
+            engine.call("book.open", json!({"book_id":id})).unwrap()["in_shelf"],
+            false
+        );
+        fs::remove_dir(root.join("library.json")).unwrap();
+        fs::rename(root.join("library.saved"), root.join("library.json")).unwrap();
+        drop(engine);
+        let mut engine = crate::Engine::open(root.clone()).unwrap();
+        assert_eq!(
+            engine.call("online.open", args.clone()).unwrap()["book"]["id"],
+            id
+        );
+        assert_eq!(engine.call("library.list", json!({})).unwrap()["total"], 0);
+        let saved = engine.call("book.open", json!({"book_id":id})).unwrap();
+        assert_eq!(saved["position"], position);
+        assert_eq!(saved["revision"], 1);
+        let restored = engine.call("library.add", args).unwrap();
+        assert_eq!(restored["book"]["in_shelf"], true);
+        assert_eq!(restored["restored"], true);
+        assert_eq!(
+            engine.call("book.open", json!({"book_id":id})).unwrap()["position"],
+            position
+        );
+        drop(engine);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn engine_suspend_cancels_search_and_old_job_cannot_cancel_current_job() {
         let (release, wait) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {

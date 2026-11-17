@@ -1,1 +1,1 @@
-{"schema":1,"id":"reader","name":"小说","version":"0.1.9","service_api":1,"target":"windows-x86_64","entrypoint":"bin/reader-service.exe","page":{"template":"book_library","library_method":"library.list","read_method":"chapter.read"}}
+{"schema":1,"id":"reader","name":"小说","version":"0.1.10","service_api":1,"target":"windows-x86_64","entrypoint":"bin/reader-service.exe","page":{"template":"book_library","library_method":"library.list","read_method":"chapter.read"}}

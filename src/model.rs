@@ -72,6 +72,11 @@ pub struct Entry {
     pub position: Option<Position>,
     pub revision: u64,
     pub updated_ms: u64,
+    #[serde(default = "default_shelf")]
+    pub in_shelf: bool,
+}
+fn default_shelf() -> bool {
+    true
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]

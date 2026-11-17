@@ -165,6 +165,16 @@ fn import_progress_restart_duplicate_search_and_remove_preserve_original() {
             .unwrap_err(),
         "invalid_position"
     );
+    engine
+        .call("library.favorite", json!({"book_id":id,"in_shelf":false}))
+        .unwrap();
+    assert_eq!(engine.call("library.list", json!({})).unwrap()["total"], 0);
+    let restored = fixture.import(&mut engine, "book.txt");
+    assert_eq!(restored["restored"], true);
+    assert_eq!(
+        engine.call("book.open", json!({"book_id":id})).unwrap()["position"],
+        position
+    );
     drop(engine);
     fs::remove_file(fixture.0.join("book.txt")).unwrap();
     let mut engine = Engine::open(data.clone()).unwrap();

@@ -129,9 +129,30 @@ impl Engine {
             4 * 1024 * 1024,
         )
     }
-    fn import(&mut self, parsed: parse::Parsed) -> Result<Value> {
+    fn favorite(&mut self, id: &str, in_shelf: bool) -> Result<Value> {
+        let mut next = self.library.clone();
+        let entry = next
+            .entries
+            .iter_mut()
+            .find(|e| e.id == id)
+            .ok_or("book_not_found")?;
+        if entry.in_shelf == in_shelf {
+            return Ok(json!({"book":entry}));
+        }
+        entry.in_shelf = in_shelf;
+        let entry = entry.clone();
+        self.commit(next)?;
+        Ok(json!({"book":entry}))
+    }
+    fn import(&mut self, parsed: parse::Parsed, in_shelf: bool) -> Result<Value> {
         if let Some(existing) = self.library.entries.iter().find(|e| e.id == parsed.book.id) {
-            return Ok(json!({"book":existing,"duplicate":true}));
+            let restored = in_shelf && !existing.in_shelf;
+            let entry = if restored {
+                self.favorite(&parsed.book.id, true)?["book"].clone()
+            } else {
+                json!(existing)
+            };
+            return Ok(json!({"book":entry,"duplicate":true,"restored":restored}));
         }
         if self.library.entries.len() >= 5000 {
             return Err("library_full");
@@ -178,6 +199,7 @@ impl Engine {
                 position: None,
                 revision: 0,
                 updated_ms: now(),
+                in_shelf,
             };
             let mut next = self.library.clone();
             next.entries.push(entry.clone());
@@ -192,7 +214,7 @@ impl Engine {
         }
         result
     }
-    fn add_online(&mut self, detail: Value) -> Result<Value> {
+    fn add_online(&mut self, detail: Value, in_shelf: bool) -> Result<Value> {
         // This snapshot comes only from the completed, validated source worker.
         let source_id = detail["id"].as_str().ok_or("invalid_source_response")?;
         let id = format!(
@@ -239,12 +261,15 @@ impl Engine {
             resources: Default::default(),
             warnings: vec![],
         };
-        self.import(parse::Parsed {
-            book,
-            chapters: vec![],
-            resources: Default::default(),
-            original: vec![],
-        })
+        self.import(
+            parse::Parsed {
+                book,
+                chapters: vec![],
+                resources: Default::default(),
+                original: vec![],
+            },
+            in_shelf,
+        )
     }
     pub fn call(&mut self, method: &str, args: Value) -> Result<Value> {
         if !args.is_object() {
@@ -276,7 +301,13 @@ impl Engine {
                 self.body_job = Some(self.next_job);
                 Ok(json!({"job":self.next_job,"status":"pending"}))
             }
-            "library.add" => {
+            "library.favorite" => {
+                let id = string(&args, "book_id")?;
+                let in_shelf = args["in_shelf"].as_bool().ok_or("invalid_arguments")?;
+                self.favorite(id, in_shelf)
+            }
+            "library.add" | "online.open" => {
+                let in_shelf = method == "library.add";
                 if args["source"] != "fanqie" {
                     return Err("unsupported_source");
                 }
@@ -287,6 +318,12 @@ impl Engine {
                     .iter()
                     .find(|e| e.source.kind == "fanqie" && e.source.id == source_id)
                 {
+                    if in_shelf && !existing.in_shelf {
+                        let id = existing.id.clone();
+                        return Ok(
+                            json!({"book":self.favorite(&id,true)?["book"],"duplicate":true,"restored":true}),
+                        );
+                    }
                     return Ok(json!({"book":existing,"duplicate":true}));
                 }
                 let detail = self
@@ -294,7 +331,7 @@ impl Engine {
                     .as_ref()
                     .ok_or("source_detail_required")?
                     .detail_result(source_id)?;
-                self.add_online(detail)
+                self.add_online(detail, in_shelf)
             }
             "online.search" | "online.detail" => {
                 if self.search.as_ref().is_some_and(|s| s.running()) {
@@ -345,13 +382,13 @@ impl Engine {
                 Ok(json!({}))
             }
             "health" => Ok(
-                json!({"service":"reader","api_version":1,"capabilities":["local_import","chapters","progress","chapter_search","online_search","online_details","online_shelf","online_body"]}),
+                json!({"service":"reader","api_version":1,"capabilities":["local_import","chapters","progress","chapter_search","online_search","online_details","online_shelf","online_body","shelf_membership"]}),
             ),
             "library.list" => {
                 let start = args["start"].as_u64().unwrap_or(0) as usize;
                 let limit = args["limit"].as_u64().unwrap_or(100).min(100) as usize;
                 Ok(
-                    json!({"entries":self.library.entries.iter().skip(start).take(limit).collect::<Vec<_>>(),"total":self.library.entries.len(),"last_book":self.library.last_book}),
+                    json!({"entries":self.library.entries.iter().filter(|e|e.in_shelf).skip(start).take(limit).collect::<Vec<_>>(),"total":self.library.entries.iter().filter(|e|e.in_shelf).count(),"last_book":self.library.last_book}),
                 )
             }
             "library.import" => {
@@ -406,7 +443,7 @@ impl Engine {
                         }
                         match result {
                             Ok(Ok(parsed)) => {
-                                Ok(json!({"status":"complete","result":self.import(parsed)?}))
+                                Ok(json!({"status":"complete","result":self.import(parsed,true)?}))
                             }
                             Ok(Err(code)) => Ok(json!({"status":"failed","error":code})),
                             Err(_) => Err("import_worker_failed"),
@@ -442,7 +479,9 @@ impl Engine {
                 let id = string(&args, "book_id")?;
                 let book = self.book(id)?;
                 let entry = self.library.entries.iter().find(|e| e.id == id).unwrap();
-                Ok(json!({"book":book,"position":entry.position,"revision":entry.revision}))
+                Ok(
+                    json!({"book":book,"position":entry.position,"revision":entry.revision,"in_shelf":entry.in_shelf}),
+                )
             }
             "chapter.read" => {
                 let book = self.book(string(&args, "book_id")?)?;
