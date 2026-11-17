@@ -38,15 +38,33 @@ fn parameters(args: &Value) -> Result<(String, u64)> {
 impl Search {
     pub fn start(id: u64, args: &Value) -> Result<Self> {
         let (query, cursor) = parameters(args)?;
+        Ok(Self::worker(id, move |cancel| {
+            fetch(&query, cursor, cancel)
+        }))
+    }
+    pub fn detail(id: u64, args: &Value) -> Result<Self> {
+        if args["source"] != "fanqie" {
+            return Err("unsupported_source");
+        }
+        let book_id = args["book_id"]
+            .as_str()
+            .filter(|id| valid_id(id))
+            .ok_or("invalid_source_book")?
+            .to_owned();
+        Ok(Self::worker(id, move |cancel| {
+            fetch_detail(&book_id, cancel)
+        }))
+    }
+    fn worker(id: u64, work: impl FnOnce(&AtomicBool) -> Result<Value> + Send + 'static) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
-        let worker = std::thread::spawn(move || fetch(&query, cursor, &worker_cancel));
-        Ok(Self {
+        let worker = std::thread::spawn(move || work(&worker_cancel));
+        Self {
             id,
             cancel,
             worker: Some(worker),
             result: None,
-        })
+        }
     }
     pub fn running(&self) -> bool {
         self.worker.as_ref().is_some_and(|w| !w.is_finished())
@@ -87,11 +105,8 @@ fn network_error(error: ureq::Error) -> &'static str {
     }
 }
 
-fn fetch(query: &str, cursor: u64, cancel: &AtomicBool) -> Result<Value> {
-    if cancel.load(Ordering::Acquire) {
-        return Err("cancelled");
-    }
-    let agent = ureq::Agent::config_builder()
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
         .https_only(true)
         .max_redirects(0)
         .tls_config(
@@ -103,8 +118,13 @@ fn fetch(query: &str, cursor: u64, cancel: &AtomicBool) -> Result<Value> {
         .timeout_per_read(Some(Duration::from_secs(5)))
         .timeout_global(Some(Duration::from_secs(15)))
         .build()
-        .new_agent();
-    let response = agent
+        .new_agent()
+}
+fn fetch(query: &str, cursor: u64, cancel: &AtomicBool) -> Result<Value> {
+    if cancel.load(Ordering::Acquire) {
+        return Err("cancelled");
+    }
+    let response = agent()
         .get("https://novel.snssdk.com/api/novel/channel/homepage/search/search/v1/")
         .query("device_platform", "android")
         .query("parent_enterfrom", "novel_channel_search.tab.")
@@ -118,14 +138,14 @@ fn fetch(query: &str, cursor: u64, cancel: &AtomicBool) -> Result<Value> {
         )
         .call()
         .map_err(network_error)?;
-    read_response(response, cursor, cancel)
+    decode(&read_response(response, 1024 * 1024, cancel)?, cursor)
 }
 
 fn read_response(
     mut response: ureq::http::Response<ureq::Body>,
-    cursor: u64,
+    limit: u64,
     cancel: &AtomicBool,
-) -> Result<Value> {
+) -> Result<Vec<u8>> {
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled");
     }
@@ -140,13 +160,89 @@ fn read_response(
     let bytes = response
         .body_mut()
         .with_config()
-        .limit(1024 * 1024)
+        .limit(limit)
         .read_to_vec()
         .map_err(network_error)?;
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled");
     }
-    decode(&bytes, cursor)
+    Ok(bytes)
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 24 && id.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn fetch_detail(book_id: &str, cancel: &AtomicBool) -> Result<Value> {
+    if cancel.load(Ordering::Acquire) {
+        return Err("cancelled");
+    }
+    let response = agent()
+        .get(format!("https://fanqienovel.com/page/{book_id}"))
+        .header("Accept", "text/html")
+        .header(
+            "User-Agent",
+            "LazyBuddy/reader (+https://github.com/LazyBuddyDev/reader-service)",
+        )
+        .call()
+        .map_err(network_error)?;
+    let bytes = read_response(response, 4 * 1024 * 1024, cancel)?;
+    detail(&bytes, book_id)
+}
+
+fn detail(bytes: &[u8], book_id: &str) -> Result<Value> {
+    if bytes.is_empty() {
+        return Err("source_empty_response");
+    }
+    let html = std::str::from_utf8(bytes).map_err(|_| "invalid_source_response")?;
+    let json = html
+        .split_once("window.__INITIAL_STATE__")
+        .and_then(|(_, s)| s.trim_start().strip_prefix('='))
+        .ok_or("invalid_source_response")?;
+    // Parse one JSON value; never execute the surrounding page's JavaScript.
+    let state = serde_json::Deserializer::from_str(json)
+        .into_iter::<Value>()
+        .next()
+        .ok_or("invalid_source_response")?
+        .map_err(|_| "invalid_source_response")?;
+    let page = &state["page"];
+    if page["bookId"] != book_id {
+        return Err("invalid_source_response");
+    }
+    let title = text(page, "bookName", 300)?;
+    if title.trim().is_empty() {
+        return Err("invalid_source_response");
+    }
+    let count = page["chapterTotal"]
+        .as_u64()
+        .filter(|n| *n <= 10000)
+        .ok_or("invalid_source_response")?;
+    let volumes = page["chapterListWithVolume"]
+        .as_array()
+        .filter(|v| v.len() <= 10000)
+        .ok_or("invalid_source_response")?;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut chapters = Vec::new();
+    for volume in volumes {
+        for item in volume.as_array().ok_or("invalid_source_response")? {
+            let id = text(item, "itemId", 24)?;
+            let title = text(item, "title", 300)?;
+            if !valid_id(id)
+                || title.trim().is_empty()
+                || !seen.insert(id)
+                || chapters.len() >= 10000
+            {
+                return Err("invalid_source_response");
+            }
+            chapters.push(json!({"id":id,"title":title}));
+        }
+    }
+    if chapters.len() as u64 != count {
+        return Err("incomplete_source_directory");
+    }
+    Ok(
+        json!({"source":"fanqie","id":book_id,"title":title,"author":text(page,"author",200)?,"description":text(page,"abstract",10000)?,"chapters":chapters}),
+    )
 }
 
 fn text<'a>(item: &'a Value, key: &str, max: usize) -> Result<&'a str> {
@@ -191,7 +287,7 @@ fn decode(bytes: &[u8], cursor: u64) -> Result<Value> {
     let mut entries = Vec::new();
     for item in items {
         let id = text(item, "book_id", 24)?;
-        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        if !valid_id(id) {
             return Err("invalid_source_response");
         }
         let title = text(item, "title", 300)?;
@@ -208,6 +304,77 @@ fn decode(bytes: &[u8], cursor: u64) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn detail_page(page: Value) -> Vec<u8> {
+        format!(
+            "<script>window.__INITIAL_STATE__ = {};window.untrustedScript();</script>",
+            json!({"page":page})
+        )
+        .into_bytes()
+    }
+    fn sample_detail() -> Value {
+        json!({"bookId":"123","bookName":"示例书","author":"作者","abstract":"<script>只是简介</script>","thumbUrl":"https://private.invalid/?secret","chapterTotal":2,"chapterListWithVolume":[[{"itemId":"901","title":"第一章","isChapterLock":true}],[{"itemId":"902","title":"第二章"}]]})
+    }
+    #[test]
+    fn public_metadata_preserves_complete_directory_order_and_excludes_unrelated_fields() {
+        let value = detail(&detail_page(sample_detail()), "123").unwrap();
+        assert_eq!(value["title"], "示例书");
+        assert_eq!(
+            value["chapters"],
+            json!([{"id":"901","title":"第一章"},{"id":"902","title":"第二章"}])
+        );
+        assert_eq!(value["description"], "<script>只是简介</script>");
+        assert!(!value.to_string().contains("secret"));
+        assert!(!value.to_string().contains("isChapterLock"));
+    }
+    #[test]
+    fn metadata_cannot_silently_accept_partial_or_mismatched_directories() {
+        let mut page = sample_detail();
+        page["chapterTotal"] = json!(3);
+        assert_eq!(
+            detail(&detail_page(page), "123"),
+            Err("incomplete_source_directory")
+        );
+        let mut page = sample_detail();
+        page["chapterListWithVolume"][1][0]["itemId"] = json!("901");
+        assert_eq!(
+            detail(&detail_page(page), "123"),
+            Err("invalid_source_response")
+        );
+        assert_eq!(
+            detail(&detail_page(sample_detail()), "124"),
+            Err("invalid_source_response")
+        );
+        let mut page = sample_detail();
+        page["chapterTotal"] = json!(10001);
+        assert_eq!(
+            detail(&detail_page(page), "123"),
+            Err("invalid_source_response")
+        );
+        assert_eq!(
+            detail(b"window.__INITIAL_STATE__ = {page:undefined}", "123"),
+            Err("invalid_source_response")
+        );
+        assert_eq!(detail(b"", "123"), Err("source_empty_response"));
+    }
+    #[test]
+    fn detail_identifiers_are_checked_before_spawning_network_work() {
+        for id in [
+            "",
+            "../123",
+            "123?x=y",
+            "https://example.invalid",
+            "1234567890123456789012345",
+        ] {
+            assert!(matches!(
+                Search::detail(1, &json!({"source":"fanqie","book_id":id})),
+                Err("invalid_source_book")
+            ));
+        }
+        assert!(matches!(
+            Search::detail(1, &json!({"source":"other","book_id":"123"})),
+            Err("unsupported_source")
+        ));
+    }
     #[test]
     fn verification_redirects_limits_and_cancellation_are_checked_before_decoding() {
         let cancel = AtomicBool::new(false);
@@ -218,7 +385,7 @@ mod tests {
                 .body(ureq::Body::builder().data(b"".to_vec()))
                 .unwrap();
             assert_eq!(
-                read_response(response, 0, &cancel),
+                read_response(response, 1024 * 1024, &cancel),
                 Err("source_verification_required")
             );
         }
@@ -228,7 +395,7 @@ mod tests {
             .body(ureq::Body::builder().data(b"".to_vec()))
             .unwrap();
         assert_eq!(
-            read_response(response, 0, &cancel),
+            read_response(response, 1024 * 1024, &cancel),
             Err("source_access_denied")
         );
         assert_eq!(
@@ -239,14 +406,17 @@ mod tests {
             .body(ureq::Body::builder().data(vec![b'x'; 1024 * 1024 + 1]))
             .unwrap();
         assert_eq!(
-            read_response(response, 0, &cancel),
+            read_response(response, 1024 * 1024, &cancel),
             Err("source_response_too_large")
         );
         cancel.store(true, Ordering::Release);
         let response = reply()
             .body(ureq::Body::builder().data(b"invalid".to_vec()))
             .unwrap();
-        assert_eq!(read_response(response, 0, &cancel), Err("cancelled"));
+        assert_eq!(
+            read_response(response, 1024 * 1024, &cancel),
+            Err("cancelled")
+        );
     }
     #[test]
     fn private_font_characters_are_not_presented_as_readable_metadata() {
@@ -388,6 +558,10 @@ mod tests {
         );
         assert_eq!(
             engine.call("online.search", json!({"source":"fanqie","query":"新词"})),
+            Err("search_busy")
+        );
+        assert_eq!(
+            engine.call("online.detail", json!({"source":"fanqie","book_id":"123"})),
             Err("search_busy")
         );
         release.send(()).unwrap();

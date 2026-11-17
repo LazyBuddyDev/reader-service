@@ -169,12 +169,16 @@ impl Engine {
             return Err("invalid_arguments");
         }
         match method {
-            "online.search" => {
+            "online.search" | "online.detail" => {
                 if self.search.as_ref().is_some_and(|s| s.running()) {
                     return Err("search_busy");
                 }
                 let id = self.next_job + 1;
-                let search = online::Search::start(id, &args)?;
+                let search = if method == "online.detail" {
+                    online::Search::detail(id, &args)?
+                } else {
+                    online::Search::start(id, &args)?
+                };
                 self.next_job = id;
                 self.search = Some(search);
                 Ok(json!({"job":id,"status":"pending"}))
@@ -197,7 +201,7 @@ impl Engine {
                 Ok(json!({}))
             }
             "health" => Ok(
-                json!({"service":"reader","api_version":1,"capabilities":["local_import","chapters","progress","chapter_search","online_search"]}),
+                json!({"service":"reader","api_version":1,"capabilities":["local_import","chapters","progress","chapter_search","online_search","online_details"]}),
             ),
             "library.list" => {
                 let start = args["start"].as_u64().unwrap_or(0) as usize;

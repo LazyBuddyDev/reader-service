@@ -37,7 +37,7 @@ API v1，JSON Lines私有持久会话。请求`{version:1,id:"...",method:"...",
 
 ## 在线搜索（番茄 App）
 
-`health.capabilities`包含`online_search`。当前支持番茄App的公开匿名书籍元数据搜索；真实第一页及服务端游标下一页均已验证，每页10项。不要求登录、Cookie、设备注册或签名；不增加Python或浏览器运行时。搜索成功不代表详情、目录、正文、书架写入或章节权限通过；这些能力尚未接入。
+`health.capabilities`包含`online_search`。当前支持番茄App的公开匿名书籍元数据搜索；真实第一页及服务端游标下一页均已验证，每页10项。不要求登录、Cookie、设备注册或签名；不增加Python或浏览器运行时。详情和目录的独立能力见下节；搜索成功不代表正文、书架写入或章节权限通过。
 
 | 方法 | 参数与结果 |
 | --- | --- |
@@ -54,6 +54,18 @@ API v1，JSON Lines私有持久会话。请求`{version:1,id:"...",method:"...",
 `source_verification_required`表示响应头要求官方验证；`source_empty_response`表示无验证头的空体；401/403和重定向为`source_access_denied`，429为`source_rate_limited`。其他错误包括`source_timeout`、`source_network_failed`、`source_response_too_large`、`source_request_rejected`、`source_text_obfuscated`、`invalid_source_response`。私用字体字符拒绝展示，不把乱码冒充可读元数据。以上均不当作无结果；只有code=0且结构有效的空列表才表示空结果。
 
 宿主仅在可见内容页接受上述方法，代数与现有阅读请求一致；设置页不可搜索。书架、在线列表和设置各保留自己的状态；在线输入明确提交才请求，前后分页替换当前结果页，离开取消且不自动恢复搜索。失败保留已确认列表，换根页面、设置和隐藏后迟到结果不能更新列表；恢复只显示已有状态。
+
+## 在线详情与目录（官方公开元数据）
+
+`health.capabilities`包含`online_details`。`online.detail {source:"fanqie",book_id}`返回`{job,status:"pending"}`，复用`online.status`及`online.cancel`。搜索与详情共用一个真实在途任务；切换、挂起或退出不派生后续请求，取消后迟到结果不可交付。标识为1–24位ASCII数字字符串，传给固定URL前验证，不接受任意URL。
+
+完成结果为`{source:"fanqie",id,title,author,description,chapters:[{id,title}]}`。字段中的ID均为来源ID，不转换成宿主本地书籍ID；尚未保存为书架或内容版本。只返回白名单元数据，不返回封面、账号、上游签名或网页锁定字段；网页锁定状态不能代替App章节权限。
+
+详情只请求`https://fanqienovel.com/page/<book_id>`官方公开页面。真实验证已读回《惊鸿》的4423章完整目录。使用与搜索相同的NativeTls、系统代理及有界超时；响应上限4MiB。只通过serde_json解析`window.__INITIAL_STATE__`赋值中的第一个JSON值，不执行网页JavaScript或请求其资源。书籍ID必须匹配请求；标题、作者和简介的上限与搜索一致，目录最多10000章，章节ID唯一并保留服务端卷序/章序；实际章数必须等于声明总数。缺失章节返回`incomplete_source_directory`，结构错误或重复ID返回`invalid_source_response`，不能当作空目录。
+
+宿主在用户明确点击搜索结果的“详情”后请求，不预取其他书籍。目录每页只渲染100章，分页只切本地已验证快照，不联网。返回结果、切换根页面或设置会保留搜索快照及滚动；已载入目录和展示页保留，载入中离开则取消，重新进入只显示保留内容，由用户明确选择“载入目录”再请求。
+
+此能力只提供书籍详情与目录，不表示正文可读。已对旧匿名App目录及首章正文端点各进行一次核验，均为HTTP200空体，未使用账号、设备注册、内容密钥或版本降级；原因未知，不推断为付费、账号限制或服务端封禁。用户确认搜索已可用，正文仍需验证兼容的正常客户端/会话及授权范围；不通过换设备、降级或第三方正文代理补齐。
 
 ## 边界与错误
 
