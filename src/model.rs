@@ -94,6 +94,8 @@ pub struct Preferences {
     pub width: u32,
     #[serde(default)]
     pub page_mode: PageMode,
+    #[serde(default = "default_history_limit")]
+    pub history_limit: usize,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -102,6 +104,7 @@ impl Default for Preferences {
             line_height: 1.9,
             width: 680,
             page_mode: PageMode::default(),
+            history_limit: default_history_limit(),
         }
     }
 }
@@ -110,7 +113,16 @@ impl Preferences {
         (14..=36).contains(&self.font_size)
             && (1.3..=2.5).contains(&self.line_height)
             && (320..=1000).contains(&self.width)
+            && (1..=500).contains(&self.history_limit)
     }
+}
+fn default_history_limit() -> usize {
+    100
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Visit {
+    pub book_id: String,
+    pub visited_ms: u64,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Library {
@@ -118,6 +130,8 @@ pub struct Library {
     pub entries: Vec<Entry>,
     pub preferences: Preferences,
     pub last_book: Option<String>,
+    #[serde(default)]
+    pub history: Vec<Visit>,
 }
 pub fn hash(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};

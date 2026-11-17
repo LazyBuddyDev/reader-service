@@ -236,3 +236,105 @@ fn cancellation_does_not_publish_a_book_or_read_arbitrary_identifiers() {
             .is_err()
     );
 }
+
+#[test]
+fn history_orders_deduplicates_trims_and_preserves_books() {
+    let fixture = Fixture::new();
+    let mut engine = Engine::open(fixture.0.join("data")).unwrap();
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let file = format!("{i}.txt");
+        fs::write(fixture.0.join(&file), format!("chapter {i}\nbody {i}")).unwrap();
+        ids.push(
+            fixture.import(&mut engine, &file)["book"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    assert_eq!(engine.call("history.list", json!({})).unwrap()["total"], 0);
+    for id in &ids {
+        engine.call("book.open", json!({"book_id":id})).unwrap();
+    }
+    engine.call("book.open", json!({"book_id":ids[0]})).unwrap();
+    let history = engine.call("history.list", json!({})).unwrap();
+    assert_eq!(history["total"], 3);
+    assert_eq!(history["entries"][0]["id"], ids[0]);
+    let mut prefs = engine.call("preferences.get", json!({})).unwrap();
+    prefs["history_limit"] = json!(2);
+    engine.call("preferences.set", prefs.clone()).unwrap();
+    assert_eq!(
+        engine
+            .call("history.list", json!({"start":1,"limit":1}))
+            .unwrap()["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(engine.call("library.list", json!({})).unwrap()["total"], 3);
+    drop(engine);
+    let mut engine = Engine::open(fixture.0.join("data")).unwrap();
+    assert_eq!(engine.call("history.list", json!({})).unwrap()["total"], 2);
+    fs::create_dir(fixture.0.join("data/library.pending")).unwrap();
+    assert_eq!(
+        engine
+            .call("book.open", json!({"book_id":ids[1]}))
+            .unwrap_err(),
+        "save_failed"
+    );
+    assert_eq!(
+        engine.call("history.list", json!({})).unwrap()["entries"][0]["id"],
+        ids[0]
+    );
+    fs::remove_dir(fixture.0.join("data/library.pending")).unwrap();
+    prefs["history_limit"] = json!(0);
+    assert_eq!(
+        engine.call("preferences.set", prefs).unwrap_err(),
+        "invalid_preferences"
+    );
+    engine
+        .call(
+            "library.favorite",
+            json!({"book_id":ids[0],"in_shelf":false}),
+        )
+        .unwrap();
+    assert_eq!(
+        engine.call("history.list", json!({})).unwrap()["entries"][0]["id"],
+        ids[0]
+    );
+    engine
+        .call("library.remove", json!({"book_id":ids[0]}))
+        .unwrap();
+    assert_eq!(engine.call("history.list", json!({})).unwrap()["total"], 1);
+}
+
+#[test]
+fn old_positions_seed_history_once_without_reappearing_after_trimming() {
+    let fixture = Fixture::new();
+    let data = fixture.0.join("data");
+    let mut engine = Engine::open(data.clone()).unwrap();
+    fs::write(fixture.0.join("old.txt"), "old chapter\nold body").unwrap();
+    let entry = fixture.import(&mut engine, "old.txt")["book"].clone();
+    drop(engine);
+    let path = data.join("library.json");
+    let mut old: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("history");
+    old["preferences"]
+        .as_object_mut()
+        .unwrap()
+        .remove("history_limit");
+    old["entries"][0]["position"] = json!({"book_id":entry["id"],"content_version":entry["content_version"],"chapter_id":"c0","block_id":"b0","offset":0});
+    fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let mut engine = Engine::open(data.clone()).unwrap();
+    assert_eq!(engine.call("history.list", json!({})).unwrap()["total"], 1);
+    let prefs = engine.call("preferences.get", json!({})).unwrap();
+    assert_eq!(prefs["history_limit"], 100);
+    engine.call("preferences.set", prefs).unwrap();
+    drop(engine);
+    let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    saved["history"] = json!([]);
+    fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let mut engine = Engine::open(data).unwrap();
+    assert_eq!(engine.call("history.list", json!({})).unwrap()["total"], 0);
+}

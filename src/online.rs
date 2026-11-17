@@ -714,7 +714,7 @@ mod tests {
             Err("save_failed")
         );
         assert_eq!(
-            engine.call("book.open", json!({"book_id":id})).unwrap()["in_shelf"],
+            engine.call("online.open", args.clone()).unwrap()["book"]["in_shelf"],
             false
         );
         fs::remove_dir(root.join("library.json")).unwrap();

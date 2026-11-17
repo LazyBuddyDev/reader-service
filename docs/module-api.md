@@ -137,3 +137,9 @@ EPUB按spine阅读，使用EPUB3导航或EPUB2 NCX标题。只读取受控归档
 ## 书架状态与直接阅读
 
 `health.capabilities`中的`shelf_membership`表示支持独立书架状态。Entry的`in_shelf`持久化；旧索引缺省为true，沿用原书架。`online.open {source:"fanqie",book_id}`与`library.add`复用已验证详情保存逻辑，首次保存不加入书架；再次打开已有条目不改变书架状态。`library.add`和重复导入本地文件会重新加入已移出条目，保留原有进度。`library.favorite`只切换本应用书架状态，不写官方账号收藏；失败不提交内存，重复相同状态不写文件。移出后正文读取和位置保存仍可继续。`library.remove`仍是物理删除副本及记录的显式接口，不用于星标切换。
+
+## 浏览记录
+
+`browsing_history`能力提供`history.list {start?:0,limit?:100}`，返回`{entries,total}`，每项为Entry并带`visited_ms`；每页最多100项。成功打开`book.open`时原子更新最近访问，同一书籍仅保留一条，最新在前；读取历史本身不更新顺序。未收藏条目同样可再次打开。首次读取旧索引时从已有位置和更新时间初始化；导入和详情检索不产生浏览记录。保存失败返回错误，内存不提交。
+
+阅读偏好增加`history_limit`，缺省100，协议允许1–500；宿主选择10/20/50/100/200/500条。降低上限立即裁剪旧记录，与偏好原子保存。裁剪及移出书架不删除书籍、副本或阅读位置；显式`library.remove`会同时删除对应记录。浏览记录属于本应用，不同步来源账号。

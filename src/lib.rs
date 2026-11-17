@@ -48,7 +48,29 @@ impl Engine {
         fs::create_dir_all(root.join("books")).map_err(|_| "data_directory_failed")?;
         let path = root.join("library.json");
         let library: Library = match fs::metadata(&path) {
-            Ok(_) => read_json(&path, 8 * 1024 * 1024)?,
+            Ok(_) => {
+                let value: Value = read_json(&path, 8 * 1024 * 1024)?;
+                let missing_history = value.get("history").is_none();
+                let mut library: Library =
+                    serde_json::from_value(value).map_err(|_| "invalid_saved_data")?;
+                if missing_history {
+                    let mut entries: Vec<_> = library
+                        .entries
+                        .iter()
+                        .filter(|e| e.position.is_some())
+                        .collect();
+                    entries.sort_by_key(|e| std::cmp::Reverse(e.updated_ms));
+                    library.history = entries
+                        .into_iter()
+                        .take(library.preferences.history_limit)
+                        .map(|e| Visit {
+                            book_id: e.id.clone(),
+                            visited_ms: e.updated_ms,
+                        })
+                        .collect();
+                }
+                library
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Library {
                 schema: 1,
                 ..Library::default()
@@ -57,6 +79,11 @@ impl Engine {
         };
         if library.schema != 1
             || !library.preferences.valid()
+            || library.history.len() > library.preferences.history_limit
+            || library
+                .history
+                .iter()
+                .any(|v| !library.entries.iter().any(|e| e.id == v.book_id))
             || library.entries.len() > 5000
             || library.entries.iter().any(|e| !book_id(&e.id))
         {
@@ -382,7 +409,7 @@ impl Engine {
                 Ok(json!({}))
             }
             "health" => Ok(
-                json!({"service":"reader","api_version":1,"capabilities":["local_import","chapters","progress","chapter_search","online_search","online_details","online_shelf","online_body","shelf_membership"]}),
+                json!({"service":"reader","api_version":1,"capabilities":["local_import","chapters","progress","chapter_search","online_search","online_details","online_shelf","online_body","shelf_membership","browsing_history"]}),
             ),
             "library.list" => {
                 let start = args["start"].as_u64().unwrap_or(0) as usize;
@@ -390,6 +417,29 @@ impl Engine {
                 Ok(
                     json!({"entries":self.library.entries.iter().filter(|e|e.in_shelf).skip(start).take(limit).collect::<Vec<_>>(),"total":self.library.entries.iter().filter(|e|e.in_shelf).count(),"last_book":self.library.last_book}),
                 )
+            }
+            "history.list" => {
+                let start = args["start"].as_u64().unwrap_or(0) as usize;
+                let limit = args["limit"].as_u64().unwrap_or(100).min(100) as usize;
+                let entries: Vec<_> = self
+                    .library
+                    .history
+                    .iter()
+                    .skip(start)
+                    .take(limit)
+                    .map(|v| {
+                        let mut entry = json!(
+                            self.library
+                                .entries
+                                .iter()
+                                .find(|e| e.id == v.book_id)
+                                .unwrap()
+                        );
+                        entry["visited_ms"] = json!(v.visited_ms);
+                        entry
+                    })
+                    .collect();
+                Ok(json!({"entries":entries,"total":self.library.history.len()}))
             }
             "library.import" => {
                 if let Some(job) = &self.job {
@@ -467,6 +517,7 @@ impl Engine {
                 let directory = self.directory(id)?;
                 let mut next = self.library.clone();
                 next.entries.retain(|e| e.id != id);
+                next.history.retain(|v| v.book_id != id);
                 if next.last_book.as_deref() == Some(id) {
                     next.last_book = None;
                 }
@@ -478,6 +529,17 @@ impl Engine {
             "book.open" => {
                 let id = string(&args, "book_id")?;
                 let book = self.book(id)?;
+                let mut next = self.library.clone();
+                next.history.retain(|v| v.book_id != id);
+                next.history.insert(
+                    0,
+                    Visit {
+                        book_id: id.to_owned(),
+                        visited_ms: now(),
+                    },
+                );
+                next.history.truncate(next.preferences.history_limit);
+                self.commit(next)?;
                 let entry = self.library.entries.iter().find(|e| e.id == id).unwrap();
                 Ok(
                     json!({"book":book,"position":entry.position,"revision":entry.revision,"in_shelf":entry.in_shelf}),
@@ -607,6 +669,7 @@ impl Engine {
                     return Err("invalid_preferences");
                 }
                 let mut next = self.library.clone();
+                next.history.truncate(prefs.history_limit);
                 next.preferences = prefs;
                 self.commit(next)?;
                 Ok(json!(self.library.preferences))
