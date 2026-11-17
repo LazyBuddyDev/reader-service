@@ -1,4 +1,4 @@
-//! Anonymous official web search only; no device registration or verification bypass.
+//! Anonymous official App metadata search only; no device registration or verification bypass.
 use crate::model::Result;
 use serde_json::{Value, json};
 use std::{
@@ -25,22 +25,22 @@ fn parameters(args: &Value) -> Result<(String, u64)> {
     if query.is_empty() || query.chars().count() > 100 || query.chars().any(char::is_control) {
         return Err("invalid_search_query");
     }
-    let page = match args.get("page") {
+    let cursor = match args.get("cursor") {
         None => 0,
         Some(value) => value
             .as_u64()
-            .filter(|p| *p < 100)
-            .ok_or("invalid_search_page")?,
+            .filter(|p| *p <= u32::MAX as u64)
+            .ok_or("invalid_search_cursor")?,
     };
-    Ok((query.to_owned(), page))
+    Ok((query.to_owned(), cursor))
 }
 
 impl Search {
     pub fn start(id: u64, args: &Value) -> Result<Self> {
-        let (query, page) = parameters(args)?;
+        let (query, cursor) = parameters(args)?;
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
-        let worker = std::thread::spawn(move || fetch(&query, page, &worker_cancel));
+        let worker = std::thread::spawn(move || fetch(&query, cursor, &worker_cancel));
         Ok(Self {
             id,
             cancel,
@@ -81,11 +81,13 @@ fn network_error(error: ureq::Error) -> &'static str {
         ureq::Error::StatusCode(401 | 403) => "source_access_denied",
         ureq::Error::StatusCode(429) => "source_rate_limited",
         ureq::Error::Timeout(_) => "source_timeout",
+        ureq::Error::TooManyRedirects => "source_access_denied",
+        ureq::Error::BodyExceedsLimit(_) => "source_response_too_large",
         _ => "source_network_failed",
     }
 }
 
-fn fetch(query: &str, page: u64, cancel: &AtomicBool) -> Result<Value> {
+fn fetch(query: &str, cursor: u64, cancel: &AtomicBool) -> Result<Value> {
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled");
     }
@@ -102,13 +104,13 @@ fn fetch(query: &str, page: u64, cancel: &AtomicBool) -> Result<Value> {
         .timeout_global(Some(Duration::from_secs(15)))
         .build()
         .new_agent();
-    let mut response = agent
-        .get("https://fanqienovel.com/api/author/search/search_book/v1")
-        .query("query_word", query)
-        .query("page_index", page.to_string())
-        .query("page_count", "10")
-        .query("query_type", "0")
-        .query("filter", "127,127,127,127")
+    let response = agent
+        .get("https://novel.snssdk.com/api/novel/channel/homepage/search/search/v1/")
+        .query("device_platform", "android")
+        .query("parent_enterfrom", "novel_channel_search.tab.")
+        .query("aid", "1967")
+        .query("q", query)
+        .query("offset", cursor.to_string())
         .header("Accept", "application/json")
         .header(
             "User-Agent",
@@ -116,6 +118,17 @@ fn fetch(query: &str, page: u64, cancel: &AtomicBool) -> Result<Value> {
         )
         .call()
         .map_err(network_error)?;
+    read_response(response, cursor, cancel)
+}
+
+fn read_response(
+    mut response: ureq::http::Response<ureq::Body>,
+    cursor: u64,
+    cancel: &AtomicBool,
+) -> Result<Value> {
+    if cancel.load(Ordering::Acquire) {
+        return Err("cancelled");
+    }
     if response.headers().contains_key("bdturing-verify")
         || response.headers().contains_key("x-vc-bdturing-parameters")
     {
@@ -133,16 +146,24 @@ fn fetch(query: &str, page: u64, cancel: &AtomicBool) -> Result<Value> {
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled");
     }
-    decode(&bytes, page)
+    decode(&bytes, cursor)
 }
 
 fn text<'a>(item: &'a Value, key: &str, max: usize) -> Result<&'a str> {
-    item[key]
+    let value = item[key]
         .as_str()
         .filter(|s| s.chars().count() <= max)
-        .ok_or("invalid_source_response")
+        .ok_or("invalid_source_response")?;
+    // Reject obfuscated fallback data; the verified App endpoint returns normal Unicode.
+    if value
+        .chars()
+        .any(|c| matches!(c as u32, 0xe000..=0xf8ff | 0xf0000..=0xffffd | 0x100000..=0x10fffd))
+    {
+        return Err("source_text_obfuscated");
+    }
+    Ok(value)
 }
-fn decode(bytes: &[u8], page: u64) -> Result<Value> {
+fn decode(bytes: &[u8], cursor: u64) -> Result<Value> {
     if bytes.is_empty() {
         return Err("source_empty_response");
     }
@@ -153,30 +174,34 @@ fn decode(bytes: &[u8], page: u64) -> Result<Value> {
         None => return Err("invalid_source_response"),
     }
     let data = &value["data"];
-    let items = data["search_book_data_list"]
+    let items = data["ret_data"]
         .as_array()
-        .filter(|a| a.len() <= 10)
+        .filter(|a| a.len() <= 50)
         .ok_or("invalid_source_response")?;
-    let total = data["total_count"]
+    let has_more = data["has_more"]
+        .as_bool()
+        .ok_or("invalid_source_response")?;
+    let offset = data["offset"]
         .as_u64()
+        .filter(|n| *n <= u32::MAX as u64)
         .ok_or("invalid_source_response")?;
+    if has_more && (offset <= cursor || items.is_empty()) {
+        return Err("invalid_source_response");
+    }
     let mut entries = Vec::new();
     for item in items {
         let id = text(item, "book_id", 24)?;
         if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
             return Err("invalid_source_response");
         }
-        let title = text(item, "book_name", 300)?;
+        let title = text(item, "title", 300)?;
         if title.trim().is_empty() || entries.iter().any(|e: &Value| e["id"] == id) {
             return Err("invalid_source_response");
         }
-        entries.push(json!({"id":id,"title":title,"author":text(item,"author",200)?,"description":text(item,"book_abstract",10000)?}));
-    }
-    if entries.is_empty() && total > page * 10 {
-        return Err("invalid_source_response");
+        entries.push(json!({"id":id,"title":title,"author":text(item,"author",200)?,"description":text(item,"abstract",10000)?}));
     }
     Ok(
-        json!({"source":"fanqie","entries":entries,"page":page,"has_more":(page+1)*10<total && page<99}),
+        json!({"source":"fanqie","entries":entries,"cursor":cursor,"next_cursor":if has_more {Some(offset)} else {None}}),
     )
 }
 
@@ -184,7 +209,57 @@ fn decode(bytes: &[u8], page: u64) -> Result<Value> {
 mod tests {
     use super::*;
     #[test]
-    fn validates_source_query_and_page_before_network() {
+    fn verification_redirects_limits_and_cancellation_are_checked_before_decoding() {
+        let cancel = AtomicBool::new(false);
+        let reply = || ureq::http::Response::builder();
+        for header in ["bdturing-verify", "x-vc-bdturing-parameters"] {
+            let response = reply()
+                .header(header, "private-challenge")
+                .body(ureq::Body::builder().data(b"".to_vec()))
+                .unwrap();
+            assert_eq!(
+                read_response(response, 0, &cancel),
+                Err("source_verification_required")
+            );
+        }
+        let response = reply()
+            .status(302)
+            .header("Location", "https://private.invalid/")
+            .body(ureq::Body::builder().data(b"".to_vec()))
+            .unwrap();
+        assert_eq!(
+            read_response(response, 0, &cancel),
+            Err("source_access_denied")
+        );
+        assert_eq!(
+            network_error(ureq::Error::TooManyRedirects),
+            "source_access_denied"
+        );
+        let response = reply()
+            .body(ureq::Body::builder().data(vec![b'x'; 1024 * 1024 + 1]))
+            .unwrap();
+        assert_eq!(
+            read_response(response, 0, &cancel),
+            Err("source_response_too_large")
+        );
+        cancel.store(true, Ordering::Release);
+        let response = reply()
+            .body(ureq::Body::builder().data(b"invalid".to_vec()))
+            .unwrap();
+        assert_eq!(read_response(response, 0, &cancel), Err("cancelled"));
+    }
+    #[test]
+    fn private_font_characters_are_not_presented_as_readable_metadata() {
+        for c in ['\u{e000}', '\u{f8ff}', '\u{f0000}', '\u{10fffd}'] {
+            assert_eq!(
+                text(&json!({"title":format!("书{c}")}), "title", 300),
+                Err("source_text_obfuscated")
+            );
+        }
+        assert_eq!(text(&json!({"title":"中文😀"}), "title", 300), Ok("中文😀"));
+    }
+    #[test]
+    fn validates_source_query_and_cursor_before_network() {
         assert_eq!(
             parameters(&json!({"source":"other","query":"书"})),
             Err("unsupported_source")
@@ -200,10 +275,10 @@ mod tests {
                 Err("invalid_search_query")
             );
         }
-        for page in [json!(-1), json!(100), json!("1"), Value::Null] {
+        for page in [json!(-1), json!(4294967296u64), json!("1"), Value::Null] {
             assert_eq!(
-                parameters(&json!({"source":"fanqie","query":"书","page":page})),
-                Err("invalid_search_page")
+                parameters(&json!({"source":"fanqie","query":"书","cursor":page})),
+                Err("invalid_search_cursor")
             );
         }
         assert_eq!(
@@ -212,16 +287,16 @@ mod tests {
         );
     }
     #[test]
-    fn parses_official_web_search_shape_without_exposing_upstream_fields() {
-        let entry = json!({"book_id":"6883748331202284558","book_name":"惊鸿","author":"一夕烟雨","book_abstract":"简介","thumb_url":"https://private.invalid/?secret"});
+    fn parses_official_app_search_shape_without_exposing_upstream_fields() {
+        let entry = json!({"book_id":"6883748331202284558","title":"惊鸿","author":"一夕烟雨","abstract":"简介","thumb_url":"https://private.invalid/?secret"});
         let reply =
-            json!({"code":0,"data":{"search_book_data_list":[entry.clone()],"total_count":11}});
+            json!({"code":0,"data":{"ret_data":[entry.clone()],"has_more":true,"offset":10}});
         let result = decode(&serde_json::to_vec(&reply).unwrap(), 0).unwrap();
         assert_eq!(result["entries"][0]["id"], entry["book_id"]);
-        assert_eq!(result["has_more"], true);
+        assert_eq!(result["next_cursor"], 10);
         assert!(!result.to_string().contains("secret"));
         let mut invalid = reply;
-        invalid["data"]["search_book_data_list"][0]["book_id"] = json!("../x");
+        invalid["data"]["ret_data"][0]["book_id"] = json!("../x");
         assert_eq!(
             decode(&serde_json::to_vec(&invalid).unwrap(), 0),
             Err("invalid_source_response")
@@ -233,14 +308,14 @@ mod tests {
             b"".as_slice(),
             b"<html>verify</html>",
             br#"{"code":0}"#,
-            br#"{"code":0,"data":{"search_book_data_list":[],"total_count":1}}"#,
+            br#"{"code":0,"data":{"ret_data":[],"has_more":true,"offset":0}}"#,
             br#"{"code":1}"#,
         ] {
             assert!(decode(bytes, 0).is_err());
         }
         assert_eq!(
             decode(
-                br#"{"code":0,"data":{"search_book_data_list":[],"total_count":0}}"#,
+                br#"{"code":0,"data":{"ret_data":[],"has_more":false,"offset":0}}"#,
                 0
             )
             .unwrap()["entries"],

@@ -35,23 +35,25 @@ API v1，JSON Lines私有持久会话。请求`{version:1,id:"...",method:"...",
 
 导入解析在工作线程执行，查询接口不等待整个解析。完成状态读回才进行当前文件的有序提交；挂起会丢弃未提交结果。多文件队列归客户端，离页取消剩余队列；取消不撤销已经完成的导入。服务退出时请求取消，不派生任务。
 
-## 实验性在线搜索
+## 在线搜索（番茄 App）
 
-当前只实现番茄官方网页搜索适配，不在`health.capabilities`中声明可用。尚无真实成功响应验收，宿主尚未开放入口；详情、目录、正文、加入书架、账号及追更均未接入。样例测试通过不代表线上可用。
+`health.capabilities`包含`online_search`。当前支持番茄App的公开匿名书籍元数据搜索；真实第一页及服务端游标下一页均已验证，每页10项。不要求登录、Cookie、设备注册或签名；不增加Python或浏览器运行时。搜索成功不代表详情、目录、正文、书架写入或章节权限通过；这些能力尚未接入。
 
 | 方法 | 参数与结果 |
 | --- | --- |
-| `online.search` | `{source:"fanqie",query,page?:0}` → `{job,status:"pending"}`；关键词去首尾空白后1–100字符，拒绝控制字符，page为0–99整数；每页10项 |
+| `online.search` | `{source:"fanqie",query,cursor?:0}` → `{job,status:"pending"}`；关键词去首尾空白后1–100字符，拒绝控制字符，cursor为0–4294967295整数 |
 | `online.status` | `{job}` → pending / cancelled / failed（error为脱敏错误码）/ complete（result见下） |
 | `online.cancel` | `{job}` → `{}`；只取消匹配任务，不影响其他任务 |
 
-完成结果为`{source:"fanqie",entries:[{id,title,author,description}],page,has_more}`。ID保持官方数字字符串，不转浮点数，也不作为本地书籍ID。输出仅包含白名单元数据，不转发封面地址、验证信息或其他上游字段。搜索不读写书库、进度或凭据，不自动请求封面、详情、下一页或正文。
+完成结果为`{source:"fanqie",entries:[{id,title,author,description}],cursor,next_cursor}`。`next_cursor`为服务端返回的下一偏移量，末页为null；客户端不得按结果条数推算。结果不超过50项，保留数字字符串ID，不转浮点数，也不作为本地书籍ID。仅输出白名单元数据，不转发封面、跳转、search_id或其他上游字段；同名书籍不自动合并。搜索不读写书库、进度或凭据，不自动获取封面、详情、下一页或正文。
 
 搜索在独立线程执行；全服务同时最多一个实际在途搜索，未结束时返回`search_busy`。挂起和退出请求取消，迟到结果不可读回；取消不保证立即中断底层阻塞I/O，该请求在至多15秒的全局超时内继续占用并发。新任务替代已结束任务后，旧job的状态/取消请求返回`job_not_found`，不会取消新任务。导入与搜索各有独立状态。
 
-仅请求固定HTTPS端点`https://fanqienovel.com/api/author/search/search_book/v1`，使用NativeTls和当前系统代理，不接受任意URL、不跟随重定向、不重试、不注册设备、不使用第三方正文代理、不绕过验证。连接超时8秒、单次读取5秒、全局15秒，响应最多1MiB。保留`query_word`、`page_index`、`page_count=10`、`query_type=0`及默认filter参数；依据[官方搜索页面](https://fanqienovel.com/search/%E6%83%8A%E9%B8%BF)加载的公开客户端脚本核对字段，并非官方承诺稳定的开放API。
+固定端点为`https://novel.snssdk.com/api/novel/channel/homepage/search/search/v1/`；参数为`device_platform=android`、`parent_enterfrom=novel_channel_search.tab.`、`aid=1967`、`q`和`offset`。复用ureq的参数编码、NativeTls及系统代理，不接受任意URL、不跟随重定向、不重试、不注册或轮换设备。连接超时8秒、单次读取5秒、全局15秒，响应最多1MiB。请求形状参考[已有番茄App适配](https://github.com/lingyi-ling/novel-downloader/blob/main/src/novel_downloader/plugins/sites/fanqienovel/searcher.py)和[已有书源的匿名搜索说明](https://github.com/gs1147/fanqie-booksource/blob/main/搭建指南.md)，并以真实响应验证；不是官方承诺稳定的开放API。当前端点无需签名，因此不移植上游签名、设备注册或正文解密代码。
 
-`source_verification_required`表示响应头要求人机验证；`source_empty_response`表示无验证头的空体；401/403为`source_access_denied`，429为`source_rate_limited`。其他错误包括`source_timeout`、`source_network_failed`、`source_request_rejected`、`invalid_source_response`。以上均不当作无结果；只有code=0且结构有效的空列表才表示空结果。
+`source_verification_required`表示响应头要求官方验证；`source_empty_response`表示无验证头的空体；401/403和重定向为`source_access_denied`，429为`source_rate_limited`。其他错误包括`source_timeout`、`source_network_failed`、`source_response_too_large`、`source_request_rejected`、`source_text_obfuscated`、`invalid_source_response`。私用字体字符拒绝展示，不把乱码冒充可读元数据。以上均不当作无结果；只有code=0且结构有效的空列表才表示空结果。
+
+宿主仅在可见内容页接受上述方法，代数与现有阅读请求一致；设置页不可搜索。书架、在线列表和设置各保留自己的状态；在线输入明确提交才请求，前后分页替换当前结果页，离开取消且不自动恢复搜索。失败保留已确认列表，换根页面、设置和隐藏后迟到结果不能更新列表；恢复只显示已有状态。
 
 ## 边界与错误
 

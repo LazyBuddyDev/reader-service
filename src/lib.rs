@@ -197,7 +197,7 @@ impl Engine {
                 Ok(json!({}))
             }
             "health" => Ok(
-                json!({"service":"reader","api_version":1,"capabilities":["local_import","chapters","progress","chapter_search"]}),
+                json!({"service":"reader","api_version":1,"capabilities":["local_import","chapters","progress","chapter_search","online_search"]}),
             ),
             "library.list" => {
                 let start = args["start"].as_u64().unwrap_or(0) as usize;
