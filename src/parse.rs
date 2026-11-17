@@ -669,3 +669,141 @@ mod tests {
         assert!(xml("<!DOCTYPE a [<!ENTITY e SYSTEM 'file:///x'>]><a>&e;</a>").is_err());
     }
 }
+
+/// Parse the source HTML as inert text blocks; never fetch embedded resources.
+pub fn online_html(content: &str) -> Result<Vec<Block>> {
+    if content.len() > 1024 * 1024 {
+        return Err("source_response_too_large");
+    }
+    let document = scraper::Html::parse_document(content);
+    if document.tree.nodes().count() > 50000 {
+        return Err("source_response_too_large");
+    }
+    let mut blocks = vec![];
+    fn visit(node: scraper::ElementRef<'_>, blocks: &mut Vec<Block>, depth: usize) -> Result<()> {
+        if depth > 128 {
+            return Err("content_too_deep");
+        }
+        let name = node.value().name();
+        if matches!(
+            name,
+            "script" | "style" | "head" | "iframe" | "object" | "svg" | "audio" | "video" | "form"
+        ) {
+            return Ok(());
+        }
+        let paragraph = matches!(
+            name,
+            "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li" | "pre" | "blockquote"
+        );
+        if paragraph {
+            let mut runs = vec![];
+            for child in node.descendants() {
+                if child.ancestors().take(130).count() > 128 {
+                    return Err("content_too_deep");
+                }
+                if child
+                    .ancestors()
+                    .filter_map(scraper::ElementRef::wrap)
+                    .any(|n| {
+                        matches!(
+                            n.value().name(),
+                            "script" | "style" | "iframe" | "object" | "svg"
+                        )
+                    })
+                {
+                    continue;
+                }
+                let value = if let Some(t) = child.value().as_text() {
+                    t.text.to_string()
+                } else if scraper::ElementRef::wrap(child).is_some_and(|n| n.value().name() == "br")
+                {
+                    "\n".into()
+                } else {
+                    continue;
+                };
+                runs.push(Run {
+                    text: value,
+                    strong: child
+                        .ancestors()
+                        .filter_map(scraper::ElementRef::wrap)
+                        .any(|n| matches!(n.value().name(), "b" | "strong")),
+                    emphasis: child
+                        .ancestors()
+                        .filter_map(scraper::ElementRef::wrap)
+                        .any(|n| matches!(n.value().name(), "i" | "em")),
+                    link: None,
+                });
+            }
+            let value = runs.iter().map(|r| r.text.as_str()).collect::<String>();
+            let kind = if name.starts_with('h') {
+                "heading"
+            } else if name == "pre" {
+                "pre"
+            } else {
+                "paragraph"
+            };
+            if !value.trim().is_empty() {
+                if value.chars().count() <= 1024 {
+                    blocks.push(Block {
+                        runs,
+                        ..block(kind, value)
+                    });
+                } else {
+                    push_text(blocks, kind, &value);
+                }
+            }
+        } else {
+            for child in node.children() {
+                if let Some(element) = scraper::ElementRef::wrap(child) {
+                    visit(element, blocks, depth + 1)?;
+                } else if let Some(text) = child.value().as_text() {
+                    push_text(blocks, "paragraph", &text.text);
+                }
+            }
+        }
+        Ok(())
+    }
+    visit(document.root_element(), &mut blocks, 0)?;
+    if blocks.is_empty() {
+        return Err("source_empty_chapter");
+    }
+    if blocks.len() > 4096
+        || blocks.iter().any(|b| {
+            b.text.chars().any(
+                |c| matches!(c as u32,0xe000..=0xf8ff|0xf0000..=0xffffd|0x100000..=0x10fffd|0xfffd),
+            )
+        })
+    {
+        return Err("source_text_obfuscated");
+    }
+    for (i, b) in blocks.iter_mut().enumerate() {
+        b.id = format!("b{i}");
+    }
+    Ok(blocks)
+}
+#[cfg(test)]
+mod online_tests {
+    use super::*;
+    #[test]
+    fn source_html_is_inert_and_uses_the_existing_block_model() {
+        let blocks=online_html("<h1>标题</h1><p>前<b>粗体</b><br>后<script>secret()</script><img src='https://bad.invalid/x'></p>").unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[1].text, "前粗体\n后");
+        assert!(blocks[1].runs.iter().any(|r| r.strong));
+        assert_eq!(blocks[1].id, "b1");
+        assert_eq!(
+            online_html("<script>secret</script>").unwrap_err(),
+            "source_empty_chapter"
+        );
+        assert_eq!(
+            online_html("<p>\u{e001}</p>").unwrap_err(),
+            "source_text_obfuscated"
+        );
+        assert_eq!(
+            online_html(&format!("<p>{}</p>", "字".repeat(2049)))
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+}

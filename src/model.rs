@@ -21,6 +21,8 @@ pub struct Position {
     pub chapter_id: String,
     pub block_id: String,
     pub offset: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter_version: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Book {

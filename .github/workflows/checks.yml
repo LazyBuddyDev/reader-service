@@ -11,6 +11,11 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Parser, library and persistence tests
         run: cargo test --locked
+      - name: Native chapter helper checks
+        working-directory: helpers/fanqie
+        run: |
+          cargo fmt -- --check
+          cargo test --locked
       - name: Complete module package
         shell: pwsh
         run: ./scripts/package.ps1 -Destination "${{ github.workspace }}/target/packages/development"

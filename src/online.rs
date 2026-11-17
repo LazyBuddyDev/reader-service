@@ -55,7 +55,10 @@ impl Search {
             fetch_detail(&book_id, cancel)
         }))
     }
-    fn worker(id: u64, work: impl FnOnce(&AtomicBool) -> Result<Value> + Send + 'static) -> Self {
+    pub(crate) fn worker(
+        id: u64,
+        work: impl FnOnce(&AtomicBool) -> Result<Value> + Send + 'static,
+    ) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         let worker = std::thread::spawn(move || work(&worker_cancel));
@@ -79,6 +82,9 @@ impl Search {
     }
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
+    }
+    pub(crate) fn replace_result(&mut self, value: Value) {
+        self.result = Some(Ok(value));
     }
     pub fn status(&mut self) -> Value {
         if self.cancel.load(Ordering::Acquire) {
@@ -568,7 +574,65 @@ mod tests {
         assert_eq!(book["book"]["description"], "简介");
         assert_eq!(
             engine.call("chapter.read", json!({"book_id":id,"chapter_id":"456"})),
-            Err("source_body_unavailable")
+            Err("chapter_not_loaded")
+        );
+        assert_eq!(
+            engine.call("online.chapter", json!({"book_id":id,"chapter_id":"999"})),
+            Err("chapter_not_found")
+        );
+        let snapshot = json!({"book_id":id,"chapter_id":"456","chapter_version":"v1","blocks":crate::parse::online_html("<p>甲😀乙</p>").unwrap()});
+        engine.body.remember(snapshot.clone()).unwrap();
+        assert_eq!(
+            engine
+                .call("online.chapter", json!({"book_id":id,"chapter_id":"456"}))
+                .unwrap()["status"],
+            "complete"
+        );
+        assert_eq!(
+            engine
+                .call("chapter.read", json!({"book_id":id,"chapter_id":"456"}))
+                .unwrap()["blocks"][0]["text"],
+            "甲😀乙"
+        );
+        let mut position = json!({"book_id":id,"chapter_id":"456","block_id":"b0","offset":2,"content_version":first["book"]["content_version"],"chapter_version":"old"});
+        assert_eq!(
+            engine.call("progress.save", json!({"position":position,"revision":1})),
+            Err("content_version_changed")
+        );
+        position["chapter_version"] = json!("v1");
+        engine
+            .call("progress.save", json!({"position":position,"revision":1}))
+            .unwrap();
+        engine.call("lifecycle.suspend", json!({})).unwrap();
+        assert_eq!(
+            engine.call("book.open", json!({"book_id":id})).unwrap()["position"],
+            position
+        );
+        let mut revised = snapshot.clone();
+        revised["chapter_version"] = json!("v2");
+        engine.body.remember(revised).unwrap();
+        assert_eq!(
+            engine.call("progress.save", json!({"position":position,"revision":2})),
+            Err("content_version_changed")
+        );
+        let (release, wait) = std::sync::mpsc::channel();
+        engine.search = Some(Search::worker(3, move |_| {
+            wait.recv().unwrap();
+            Ok(snapshot)
+        }));
+        engine.body_job = Some(3);
+        engine.call("lifecycle.suspend", json!({})).unwrap();
+        release.send(()).unwrap();
+        while engine.search.as_ref().unwrap().running() {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            engine.call("online.status", json!({"job":3})).unwrap()["status"],
+            "cancelled"
+        );
+        assert_eq!(
+            engine.body.chapter(&id, "456").unwrap().chapter_version,
+            "v2"
         );
         let mut other = detail.clone();
         other["id"] = json!("124");
@@ -623,6 +687,8 @@ mod tests {
                 worker: Some(worker),
                 result: None,
             }),
+            body: Default::default(),
+            body_job: None,
         };
         assert_eq!(
             engine.call("online.status", json!({"job":2})),

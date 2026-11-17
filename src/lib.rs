@@ -1,3 +1,5 @@
+mod body;
+mod job;
 pub mod model;
 mod online;
 pub mod parse;
@@ -19,6 +21,8 @@ pub struct Engine {
     job: Option<Job>,
     next_job: u64,
     search: Option<online::Search>,
+    body: body::Body,
+    body_job: Option<u64>,
 }
 struct Job {
     id: u64,
@@ -64,6 +68,8 @@ impl Engine {
             job: None,
             next_job: 0,
             search: None,
+            body: Default::default(),
+            body_job: None,
         })
     }
     fn commit(&mut self, next: Library) -> Result<()> {
@@ -85,7 +91,11 @@ impl Engine {
     }
     fn chapter_meta<'a>(&self, book: &'a Book, chapter: &str) -> Result<&'a Chapter> {
         if book.source.kind == "fanqie" {
-            return Err("source_body_unavailable");
+            return book
+                .chapters
+                .iter()
+                .find(|c| c.id == chapter)
+                .ok_or("chapter_not_found");
         }
         let n = index(chapter, "c")?;
         book.chapters
@@ -95,7 +105,17 @@ impl Engine {
     }
     fn page(&self, book: &Book, chapter: &str, start: usize) -> Result<Vec<Block>> {
         if book.source.kind == "fanqie" {
-            return Err("source_body_unavailable");
+            let body = self.body.chapter(&book.id, chapter)?;
+            if start >= body.blocks.len() || start % PAGE_BLOCKS != 0 {
+                return Err("invalid_position");
+            }
+            return Ok(body
+                .blocks
+                .iter()
+                .skip(start)
+                .take(PAGE_BLOCKS)
+                .cloned()
+                .collect());
         }
         let meta = self.chapter_meta(book, chapter)?;
         if start >= meta.blocks || start % PAGE_BLOCKS != 0 {
@@ -231,6 +251,31 @@ impl Engine {
             return Err("invalid_arguments");
         }
         match method {
+            "online.chapter" => {
+                if self.search.as_ref().is_some_and(|s| s.running()) {
+                    return Err("search_busy");
+                }
+                let book = self.book(string(&args, "book_id")?)?;
+                if book.source.kind != "fanqie" {
+                    return Err("unsupported_source");
+                }
+                let chapter = string(&args, "chapter_id")?;
+                self.chapter_meta(&book, chapter)?;
+                if let Ok(body) = self.body.chapter(&book.id, chapter) {
+                    return Ok(
+                        json!({"status":"complete","result":{"book_id":book.id,"chapter_id":chapter,"chapter_version":body.chapter_version,"total":body.blocks.len()}}),
+                    );
+                }
+                self.next_job += 1;
+                self.search = Some(self.body.start(
+                    self.next_job,
+                    book.id,
+                    book.source.id,
+                    chapter.to_owned(),
+                ));
+                self.body_job = Some(self.next_job);
+                Ok(json!({"job":self.next_job,"status":"pending"}))
+            }
             "library.add" => {
                 if args["source"] != "fanqie" {
                     return Err("unsupported_source");
@@ -263,6 +308,7 @@ impl Engine {
                 };
                 self.next_job = id;
                 self.search = Some(search);
+                self.body_job = None;
                 Ok(json!({"job":id,"status":"pending"}))
             }
             "online.status" => {
@@ -271,7 +317,23 @@ impl Engine {
                     .as_mut()
                     .filter(|s| Some(s.id) == args["job"].as_u64())
                     .ok_or("job_not_found")?;
-                Ok(search.status())
+                let mut status = search.status();
+                if self.body_job == Some(search.id) && status["status"] == "complete" {
+                    let result = status["result"].take();
+                    self.directory(
+                        result["book_id"]
+                            .as_str()
+                            .ok_or("invalid_source_response")?,
+                    )?;
+                    let metadata = self.body.remember(result)?;
+                    self.search
+                        .as_mut()
+                        .unwrap()
+                        .replace_result(metadata.clone());
+                    status["result"] = metadata;
+                    self.body_job = None;
+                }
+                Ok(status)
             }
             "online.cancel" => {
                 let search = self
@@ -283,7 +345,7 @@ impl Engine {
                 Ok(json!({}))
             }
             "health" => Ok(
-                json!({"service":"reader","api_version":1,"capabilities":["local_import","chapters","progress","chapter_search","online_search","online_details","online_shelf"]}),
+                json!({"service":"reader","api_version":1,"capabilities":["local_import","chapters","progress","chapter_search","online_search","online_details","online_shelf","online_body"]}),
             ),
             "library.list" => {
                 let start = args["start"].as_u64().unwrap_or(0) as usize;
@@ -372,6 +434,7 @@ impl Engine {
                     next.last_book = None;
                 }
                 self.commit(next)?;
+                self.body.cache.retain(|c| c.book_id != id);
                 fs::remove_dir_all(directory).map_err(|_| "removal_cleanup_pending")?;
                 Ok(json!({}))
             }
@@ -386,8 +449,22 @@ impl Engine {
                 let chapter = string(&args, "chapter_id")?;
                 let start = args["start"].as_u64().unwrap_or(0) as usize;
                 let blocks = self.page(&book, chapter, start)?;
-                let total = self.chapter_meta(&book, chapter)?.blocks;
-                Ok(json!({"blocks":blocks,"start":start,"total":total}))
+                let total = if book.source.kind == "fanqie" {
+                    self.body.chapter(&book.id, chapter)?.blocks.len()
+                } else {
+                    self.chapter_meta(&book, chapter)?.blocks
+                };
+                let version = if book.source.kind == "fanqie" {
+                    Some(
+                        self.body
+                            .chapter(&book.id, chapter)?
+                            .chapter_version
+                            .as_str(),
+                    )
+                } else {
+                    None
+                };
+                Ok(json!({"blocks":blocks,"start":start,"total":total,"chapter_version":version}))
             }
             "chapter.find" => {
                 let book = self.book(string(&args, "book_id")?)?;
@@ -397,7 +474,11 @@ impl Engine {
                     return Err("query_too_large");
                 }
                 let start = args["start"].as_u64().unwrap_or(0) as usize;
-                let total = self.chapter_meta(&book, chapter)?.blocks;
+                let total = if book.source.kind == "fanqie" {
+                    self.body.chapter(&book.id, chapter)?.blocks.len()
+                } else {
+                    self.chapter_meta(&book, chapter)?.blocks
+                };
                 for page_start in (start / PAGE_BLOCKS * PAGE_BLOCKS..total).step_by(PAGE_BLOCKS) {
                     let blocks = self.page(&book, chapter, page_start)?;
                     for (i, block) in blocks
@@ -437,6 +518,17 @@ impl Engine {
                 let revision = args["revision"].as_u64().ok_or("invalid_revision")?;
                 let book = self.book(&position.book_id)?;
                 if position.content_version != book.content_version {
+                    return Err("content_version_changed");
+                }
+                if book.source.kind == "fanqie"
+                    && position.chapter_version.as_deref()
+                        != Some(
+                            self.body
+                                .chapter(&book.id, &position.chapter_id)?
+                                .chapter_version
+                                .as_str(),
+                        )
+                {
                     return Err("content_version_changed");
                 }
                 let block_index = index(&position.block_id, "b")?;
