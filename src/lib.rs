@@ -3,7 +3,6 @@ mod job;
 pub mod model;
 mod online;
 pub mod parse;
-mod web_sources;
 use model::*;
 use serde_json::{Value, json};
 use std::{
@@ -246,7 +245,7 @@ impl Engine {
         // This snapshot comes only from the completed, validated source worker.
         let source = detail["source"]
             .as_str()
-            .filter(|s| web_sources::supported(s))
+            .filter(|s| online::supported(s))
             .ok_or("unsupported_source")?;
         let source_id = detail["id"].as_str().ok_or("invalid_source_response")?;
         let id = format!(
@@ -313,7 +312,7 @@ impl Engine {
                     return Err("search_busy");
                 }
                 let book = self.book(string(&args, "book_id")?)?;
-                if !web_sources::supported(&book.source.kind) {
+                if !online::supported(&book.source.kind) {
                     return Err("unsupported_source");
                 }
                 let chapter = string(&args, "chapter_id")?;
@@ -342,7 +341,7 @@ impl Engine {
             "library.add" | "online.open" => {
                 let in_shelf = method == "library.add";
                 let source = string(&args, "source")?;
-                if !web_sources::supported(source) {
+                if !online::supported(source) {
                     return Err("unsupported_source");
                 }
                 let source_id = string(&args, "book_id")?;
@@ -372,7 +371,9 @@ impl Engine {
                     return Err("search_busy");
                 }
                 let id = self.next_job + 1;
-                let search = if method == "online.detail" {
+                let search = if args["source"] == "qimao" {
+                    self.body.source(id, method, &args)?
+                } else if method == "online.detail" {
                     online::Search::detail(id, &args)?
                 } else {
                     online::Search::start(id, &args)?
@@ -416,7 +417,7 @@ impl Engine {
                 Ok(json!({}))
             }
             "health" => Ok(
-                json!({"service":"reader","api_version":1,"sources":["fanqie","qimao","shuqi"],"capabilities":["local_import","chapters","progress","chapter_search","online_search","online_details","online_shelf","online_body","shelf_membership","browsing_history"]}),
+                json!({"service":"reader","api_version":1,"sources":["fanqie","qimao"],"source_channels":{"fanqie":"app","qimao":"app"},"capabilities":["local_import","chapters","progress","chapter_search","online_search","online_details","online_shelf","online_body","shelf_membership","browsing_history"]}),
             ),
             "library.list" => {
                 let start = args["start"].as_u64().unwrap_or(0) as usize;

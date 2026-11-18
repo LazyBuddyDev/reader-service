@@ -10,6 +10,10 @@ use std::{
     time::Duration,
 };
 
+pub(crate) fn supported(source: &str) -> bool {
+    matches!(source, "fanqie" | "qimao")
+}
+
 pub struct Search {
     pub id: u64,
     cancel: Arc<AtomicBool>,
@@ -17,8 +21,8 @@ pub struct Search {
     result: Option<Result<Value>>,
 }
 
-fn parameters(args: &Value) -> Result<(String, u64)> {
-    if !crate::web_sources::supported(args["source"].as_str().unwrap_or("")) {
+pub(crate) fn parameters(args: &Value) -> Result<(String, u64)> {
+    if !supported(args["source"].as_str().unwrap_or("")) {
         return Err("unsupported_source");
     }
     let query = args["query"].as_str().unwrap_or("").trim();
@@ -37,34 +41,29 @@ fn parameters(args: &Value) -> Result<(String, u64)> {
 
 impl Search {
     pub fn start(id: u64, args: &Value) -> Result<Self> {
-        let (query, cursor) = parameters(args)?;
-        let source = args["source"].as_str().unwrap().to_owned();
-        Ok(Self::worker(id, move |cancel| {
-            if source == "fanqie" {
-                fetch(&query, cursor, cancel)
-            } else {
-                crate::web_sources::search(&source, &query, cursor, cancel)
-            }
-        }))
-    }
-    pub fn detail(id: u64, args: &Value) -> Result<Self> {
-        if !crate::web_sources::supported(args["source"].as_str().unwrap_or("")) {
+        if args["source"] != "fanqie" {
             return Err("unsupported_source");
         }
-        let source = args["source"].as_str().unwrap().to_owned();
+        let (query, cursor) = parameters(args)?;
+        Ok(Self::worker(id, move |cancel| {
+            fetch(&query, cursor, cancel)
+        }))
+    }
+
+    pub fn detail(id: u64, args: &Value) -> Result<Self> {
+        if args["source"] != "fanqie" {
+            return Err("unsupported_source");
+        }
         let book_id = args["book_id"]
             .as_str()
-            .filter(|id| crate::web_sources::valid_book(&source, id))
+            .filter(|id| valid_id(id))
             .ok_or("invalid_source_book")?
             .to_owned();
         Ok(Self::worker(id, move |cancel| {
-            if source == "fanqie" {
-                fetch_detail(&book_id, cancel)
-            } else {
-                crate::web_sources::detail(&source, &book_id, cancel)
-            }
+            fetch_detail(&book_id, cancel)
         }))
     }
+
     pub(crate) fn worker(
         id: u64,
         work: impl FnOnce(&AtomicBool) -> Result<Value> + Send + 'static,
@@ -194,7 +193,7 @@ pub(crate) fn read_response(
     Ok(bytes)
 }
 
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 24 && id.bytes().all(|b| b.is_ascii_digit())
 }
 
@@ -336,7 +335,7 @@ mod tests {
             .join(format!("sources-test-{}", std::process::id()));
         let mut engine = crate::Engine::open(root.clone()).unwrap();
         let mut ids = std::collections::BTreeSet::new();
-        for source in ["fanqie", "qimao", "shuqi"] {
+        for source in ["fanqie", "qimao"] {
             let detail = json!({"source":source,"id":"123","title":"同名书","author":"作者","description":"","chapters":[{"id":"456","title":"第一章"}]});
             engine.search = Some(Search {
                 id: 1,
@@ -377,7 +376,7 @@ mod tests {
         }
         drop(engine);
         let engine = crate::Engine::open(root.clone()).unwrap();
-        assert_eq!(engine.library.entries.len(), 3);
+        assert_eq!(engine.library.entries.len(), 2);
         assert!(
             engine
                 .library

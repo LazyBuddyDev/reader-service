@@ -1,8 +1,10 @@
-# Fanqie chapter helper
+# App reading helper
 
 Independent GPL-3.0-only program. The MIT reader service invokes it over private stdin/stdout; the helper does not depend on the host GUI, workspace paths, Python or external Lua scripts.
 
 The unchanged Lua reading SDK is vendored from hesan1232/fanqie.koplugin, commit 9ba6f8151a24815be1c5a6917750704031defa96. Its original copyright notices, GPL license and third-party notices are in vendor/. Those notices describe the upstream plugin; this standalone helper does not embed KOReader. The Rust integration in this directory is distributed under GPL-3.0-only as well.
+
+Version 0.1.2 also handles Qimao's fixed App search, detail/catalog and chapter protocol. `src/qimao.rs` adapts the GPLv3 protocol in xing-yv's [7mao-novel-downloader v3.0.0 public.py](https://github.com/shing-yu/7mao-novel-downloader/blob/v3.0.0/src/public.py), exact source blob `ab5175d2f07c896d15ec3d0b9221760b1e035032`, Copyright (C) 2023 星隅 (xing-yv). It reuses the existing embedded AES-CBC and Base64 implementation; it does not incorporate the later proprietary core or SSLA code. The GPL license in vendor/LICENSE applies to this adaptation too.
 
 Build on Windows x64 with Rust and the Visual Studio C++ build tools:
 
@@ -13,7 +15,9 @@ cargo build --release --locked
 
 LuaJIT is compiled from the exact crates.io source recorded in Cargo.lock. The module package includes this directory's corresponding source and the dependencies' license texts. Dependencies are fetched by Cargo from their locked sources; no private SDK or secret build configuration is required.
 
-The only input is `{method:"chapter",book_id:<numeric string>,chapter_id:<numeric string>}`. Reply is `{ok:true,result:{content:<source HTML>}}` or `{ok:false,error:<stable code>}`. There is no URL, file, eval, device replacement or member activation command. Input is limited to 4 KiB; responses and decompression are bounded. Errors never contain the upstream response, URL, device identifiers or keys. Only fixed official HTTPS endpoints are used, redirects are refused, and a stage is never retried automatically.
+Inputs are `{method:"chapter",book_id,chapter_id}` for Fanqie and `qimao.search {query,cursor}`, `qimao.detail {book_id}`, `qimao.chapter {book_id,chapter_id}` for Qimao. IDs are numeric strings. Qimao metadata replies are normalized to the reader API, while chapter replies contain `{content:<inert source HTML>}`. Errors return `{ok:false,error:<stable code>}`. There is no URL, file, eval, device replacement or member activation command. Input is limited to 4 KiB and network responses to 4 MiB. Errors never contain the upstream response, URL, device identifiers or keys. Only fixed official HTTPS endpoints are used, redirects are refused, and a stage is never retried automatically.
+
+Qimao uses a single fixed App profile (`73720`, `com.kmxs.reader`), parameter/header signatures, and NativeTls with OS roots and system proxies. It never supplies an account token, purchases a chapter or changes profile after a failure. The supported standard text reader is type 0; audio and other reading modes are excluded from search. Permission and body responses come from the App endpoints; web VIP flags are not consulted. App content is Base64/IV/AES-CBC/PKCS7 encoded. The helper validates the returned chapter ID and UTF-8, escapes literal markup, and returns bounded paragraphs. The upstream `content_md5` is not the MD5 of the decoded UTF-8 bytes and is not presented as a verified content checksum; the service hashes its normalized blocks as before.
 
 One locally generated profile and its registered identity/key are saved in Windows Credential Manager. `LAZYBUDDY_CREDENTIAL_SCOPE` supports isolated QA instances and is inherited from the service; never use production scope for tests. The helper does not provide credential export/reset or read account cookies. Chapter text is returned through the private pipe and is not saved to disk. SDK compatibility layers supply Windows OS randomness, standard MD5, inert JSON and bounded decompression. The reader owns the helper's Windows Job and cancels it on request cancellation/timeout or service exit.
 

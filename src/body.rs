@@ -43,6 +43,22 @@ impl Body {
         }
         Ok(meta)
     }
+    pub fn source(&self, id: u64, method: &str, args: &Value) -> Result<Search> {
+        let request = if method == "online.search" {
+            let (query, cursor) = crate::online::parameters(args)?;
+            json!({"method":"qimao.search","query":query,"cursor":cursor})
+        } else {
+            let book = args["book_id"]
+                .as_str()
+                .filter(|s| crate::online::valid_id(s))
+                .ok_or("invalid_source_book")?;
+            json!({"method":"qimao.detail","book_id":book})
+        };
+        let slot = self.helper.clone();
+        Ok(Search::worker(id, move |cancel| {
+            helper_request(&slot, &request, cancel)
+        }))
+    }
     pub fn start(
         &self,
         id: u64,
@@ -53,39 +69,15 @@ impl Body {
     ) -> Search {
         let slot = self.helper.clone();
         Search::worker(id, move |cancel| {
-            if kind != "fanqie" {
-                let content = crate::web_sources::chapter(&kind, &source, &chapter, cancel)?;
-                let blocks = crate::parse::online_html(&content)?;
-                let version =
-                    hash(&serde_json::to_vec(&blocks).map_err(|_| "source_decode_failed")?);
-                return Ok(
-                    json!({"book_id":book,"chapter_id":chapter,"chapter_version":version,"blocks":blocks}),
-                );
-            }
-            let mut helper = slot.lock().map_err(|_| "source_runtime_failed")?;
-            if cancel.load(Ordering::Acquire) {
-                return Err("cancelled");
-            }
-            if helper.is_none() {
-                *helper = Some(Helper::start()?);
-            }
-            let reply = helper.as_mut().unwrap().request(
-                &json!({"method":"chapter","book_id":source,"chapter_id":chapter}),
+            let reply = helper_request(
+                &slot,
+                &json!({"method":if kind=="qimao"{"qimao.chapter"}else{"chapter"},"book_id":source,"chapter_id":chapter}),
                 cancel,
-            );
-            if reply.is_err() {
-                *helper = None;
-            }
-            let reply = reply?;
-            if reply["ok"] != true {
-                return Err(helper_error(reply["error"].as_str().unwrap_or("")));
-            }
+            )?;
             if cancel.load(Ordering::Acquire) {
                 return Err("cancelled");
             }
-            let content = reply["result"]["content"]
-                .as_str()
-                .ok_or("invalid_source_response")?;
+            let content = reply["content"].as_str().ok_or("invalid_source_response")?;
             let blocks = crate::parse::online_html(content)?;
             let version = hash(&serde_json::to_vec(&blocks).map_err(|_| "source_decode_failed")?);
             Ok(
@@ -94,8 +86,42 @@ impl Body {
         })
     }
 }
+fn helper_request(
+    slot: &Mutex<Option<Helper>>,
+    args: &Value,
+    cancel: &AtomicBool,
+) -> Result<Value> {
+    let mut helper = slot.lock().map_err(|_| "source_runtime_failed")?;
+    if cancel.load(Ordering::Acquire) {
+        return Err("cancelled");
+    }
+    if helper.is_none() {
+        *helper = Some(Helper::start()?);
+    }
+    let reply = helper.as_mut().unwrap().request(args, cancel);
+    if reply.is_err() {
+        *helper = None;
+    }
+    let mut reply = reply?;
+    if reply["ok"] != true {
+        return Err(helper_error(reply["error"].as_str().unwrap_or("")));
+    }
+    if cancel.load(Ordering::Acquire) {
+        return Err("cancelled");
+    }
+    Ok(reply["result"].take())
+}
+
 fn helper_error(code: &str) -> &'static str {
     match code {
+        "source_body_unavailable" => "source_body_unavailable",
+        "source_request_rejected" => "source_request_rejected",
+        "source_empty_chapter" => "source_empty_chapter",
+        "incomplete_source_directory" => "incomplete_source_directory",
+        "invalid_search_cursor" => "invalid_search_cursor",
+        "invalid_search_query" => "invalid_search_query",
+        "invalid_source_book" => "invalid_source_book",
+        "invalid_source_response" => "invalid_source_response",
         "source_access_denied" => "source_access_denied",
         "source_verification_required" => "source_verification_required",
         "source_empty_response" => "source_empty_response",

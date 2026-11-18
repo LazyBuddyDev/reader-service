@@ -25,8 +25,9 @@ try{
     Copy-Item -LiteralPath module.json,LICENSE -Destination $package
     $notices=@('# Third-party dependencies','', 'Exact sources are pinned by Cargo.lock. License texts accompany this package.','')
     $sourceDependencies=@()
-    $notices+='- fanqie-helper 0.1.0: GPL-3.0-only; corresponding source: sources/fanqie-helper-0.1.0.zip; upstream commit 9ba6f8151a24815be1c5a6917750704031defa96'
-    $helperLicenses=Join-Path $package 'licenses/fanqie-helper-0.1.0'
+    $notices+='- fanqie-helper 0.1.2: GPL-3.0-only; corresponding source: sources/fanqie-helper-0.1.2.zip; upstream commit 9ba6f8151a24815be1c5a6917750704031defa96'
+    $notices+='  Qimao App protocol adaptation: Copyright (C) 2023 星隅 (xing-yv), 7mao-novel-downloader v3.0.0 public.py, blob ab5175d2f07c896d15ec3d0b9221760b1e035032; GPLv3; corresponding source included in the helper archive.'
+    $helperLicenses=Join-Path $package 'licenses/fanqie-helper-0.1.2'
     New-Item -ItemType Directory -Path $helperLicenses -Force | Out-Null
     Copy-Item -LiteralPath helpers/fanqie/vendor/LICENSE,helpers/fanqie/vendor/THIRD_PARTY_NOTICES.txt -Destination $helperLicenses
     foreach($dependency in (@($metadata.packages)+@($helperMetadata.packages)) | Where-Object {$_.source} | Sort-Object name,version -Unique){
@@ -81,7 +82,7 @@ try{
     }
     $helperRoot=Join-Path $serviceRoot 'helpers/fanqie'
     $sourceFiles=@(Get-Item -LiteralPath (Join-Path $helperRoot 'Cargo.toml'),(Join-Path $helperRoot 'Cargo.lock'),(Join-Path $helperRoot 'README.md'))+@(Get-ChildItem -LiteralPath (Join-Path $helperRoot 'src'),(Join-Path $helperRoot 'vendor'),(Join-Path $helperRoot 'licenses') -Recurse -File)
-    $sourceZip=[IO.Compression.ZipFile]::Open((Join-Path $sourceDirectory 'fanqie-helper-0.1.0.zip'),[IO.Compression.ZipArchiveMode]::Create)
+    $sourceZip=[IO.Compression.ZipFile]::Open((Join-Path $sourceDirectory 'fanqie-helper-0.1.2.zip'),[IO.Compression.ZipArchiveMode]::Create)
     try{
         foreach($sourceFile in $sourceFiles){
             $relative=$sourceFile.FullName.Substring($helperRoot.Length+1).Replace('\','/')

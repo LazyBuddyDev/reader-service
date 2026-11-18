@@ -1,3 +1,4 @@
+mod qimao;
 mod vault;
 use md5::{Digest, Md5};
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value as LuaValue};
@@ -342,7 +343,12 @@ fn main() {
         let Ok(request) = serde_json::from_slice::<Value>(&bytes) else {
             break;
         };
-        let result = if request["method"] == "chapter"
+        let result = if request["method"]
+            .as_str()
+            .is_some_and(|m| matches!(m, "qimao.search" | "qimao.detail" | "qimao.chapter"))
+        {
+            qimao::request(&request)
+        } else if request["method"] == "chapter"
             && request["book_id"].as_str().is_some_and(valid_id)
             && request["chapter_id"].as_str().is_some_and(valid_id)
         {
