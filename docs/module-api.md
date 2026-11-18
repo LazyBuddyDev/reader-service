@@ -18,7 +18,7 @@ API v1，JSON Lines私有持久会话。请求`{version:1,id:"...",method:"...",
 
 | 方法 | 参数与结果 |
 | --- | --- |
-| `health` | `{}` → service、api_version、当前能力列表 |
+| `health` | `{}` → service、api_version、当前能力列表及`sources:["fanqie","qimao","shuqi"]` |
 | `library.list` | `{start?:0,limit?:100}` → `{entries,total,last_book}`；仅返回在书架中的条目，过滤后分页，limit最多100 |
 | `library.import` | `{path:<用户选择的绝对路径>,encoding?:"auto"}` → `{job,status:"pending"}`；一次一个导入任务 |
 | `import.status` | `{job}` → pending / cancelled / failed（error为错误码）/ complete（result含book、duplicate、warnings） |
@@ -36,21 +36,29 @@ API v1，JSON Lines私有持久会话。请求`{version:1,id:"...",method:"...",
 
 导入解析在工作线程执行，查询接口不等待整个解析。完成状态读回才进行当前文件的有序提交；挂起会丢弃未提交结果。多文件队列归客户端，离页取消剩余队列；取消不撤销已经完成的导入。服务退出时请求取消，不派生任务。
 
-## 在线搜索（番茄 App）
+## 在线搜索
 
-`health.capabilities`包含`online_search`。当前支持番茄App的公开匿名书籍元数据搜索；真实第一页及服务端游标下一页均已验证，每页10项。不要求登录、Cookie、设备注册或签名；不增加Python或浏览器运行时。详情和目录的独立能力见下节；搜索成功不代表正文、书架写入或章节权限通过。
+`health.capabilities`包含`online_search`，`health.sources`给出当前可用来源。支持番茄App公开匿名搜索、七猫中文网和书旗小说官方访客搜索，不增加Python或浏览器运行时。宿主按实际安装服务声明显示来源；旧服务未返回sources时只显示番茄。搜索成功不代表正文或章节权限通过。
+
+| 来源ID | 搜索、目录与正文 | 权限边界 |
+| --- | --- | --- |
+| `fanqie` | App搜索、官网目录、独立App正文辅助程序 | 正文协议见后文 |
+| `qimao` | 官网公开搜索、详情和完整目录API、POST章节读取API | 只接受`is_vip:"0"`的正常可读正文；拒绝受限章节推荐正文和非空key的绘制数据 |
+| `shuqi` | 官网搜索、官方阅读页中的完整目录、官方免费正文资源 | 只接受`isFreeRead:true`的章节；不请求收费或试读资源 |
+
+七猫与书旗的部分作品/章节仅在官方客户端或付费后开放，此处只提供官方向访客开放的免费章节，不承诺全书免费。来源之间独立搜索、入架和保存进度；不聚合结果、不按同名合并，也不做换源章节映射。
 
 | 方法 | 参数与结果 |
 | --- | --- |
-| `online.search` | `{source:"fanqie",query,cursor?:0}` → `{job,status:"pending"}`；关键词去首尾空白后1–100字符，拒绝控制字符，cursor为0–4294967295整数 |
+| `online.search` | `{source:<来源ID>,query,cursor?:0}` → `{job,status:"pending"}`；关键词去首尾空白后1–100字符，拒绝控制字符，cursor为0–4294967295整数 |
 | `online.status` | `{job}` → pending / cancelled / failed（error为脱敏错误码）/ complete（result见下） |
 | `online.cancel` | `{job}` → `{}`；只取消匹配任务，不影响其他任务 |
 
-完成结果为`{source:"fanqie",entries:[{id,title,author,description}],cursor,next_cursor}`。`next_cursor`为服务端返回的下一偏移量，末页为null；客户端不得按结果条数推算。结果不超过50项，保留数字字符串ID，不转浮点数，也不作为本地书籍ID。仅输出白名单元数据，不转发封面、跳转、search_id或其他上游字段；同名书籍不自动合并。搜索不读写书库、进度或凭据，不自动获取封面、详情、下一页或正文。
+完成结果为`{source:<来源ID>,entries:[{id,title,author,description}],cursor,next_cursor}`。`next_cursor`为不透明分页值，末页为null；番茄使用服务端偏移量，七猫/书旗在服务内转换为下一页索引。客户端原样传回，不得按结果条数推算。结果不超过50项，保留来源字符串ID，不转浮点数，也不作为本地书籍ID。仅输出白名单元数据，不转发封面、跳转、search_id或其他上游字段；同名书籍不自动合并。搜索不读写书库、进度或凭据，不自动获取封面、详情、下一页或正文。
 
 搜索在独立线程执行；全服务同时最多一个实际在途搜索，未结束时返回`search_busy`。挂起和退出请求取消，迟到结果不可读回；取消不保证立即中断底层阻塞I/O，该请求在至多15秒的全局超时内继续占用并发。新任务替代已结束任务后，旧job的状态/取消请求返回`job_not_found`，不会取消新任务。导入与搜索各有独立状态。
 
-固定端点为`https://novel.snssdk.com/api/novel/channel/homepage/search/search/v1/`；参数为`device_platform=android`、`parent_enterfrom=novel_channel_search.tab.`、`aid=1967`、`q`和`offset`。复用ureq的参数编码、NativeTls及系统代理，不接受任意URL、不跟随重定向、不重试、不注册或轮换设备。连接超时8秒、单次读取5秒、全局15秒，响应最多1MiB。请求形状参考[已有番茄App适配](https://github.com/lingyi-ling/novel-downloader/blob/main/src/novel_downloader/plugins/sites/fanqienovel/searcher.py)和[已有书源的匿名搜索说明](https://github.com/gs1147/fanqie-booksource/blob/main/搭建指南.md)，并以真实响应验证；不是官方承诺稳定的开放API。当前端点无需签名，因此不移植上游签名、设备注册或正文解密代码。
+番茄搜索固定端点为`https://novel.snssdk.com/api/novel/channel/homepage/search/search/v1/`；参数为`device_platform=android`、`parent_enterfrom=novel_channel_search.tab.`、`aid=1967`、`q`和`offset`。复用ureq的参数编码、NativeTls、Windows系统可信证书链及系统代理，不接受任意URL、不跟随重定向、不重试、不注册或轮换设备。连接超时8秒、单次读取5秒、全局15秒，响应最多1MiB。请求形状参考[已有番茄App适配](https://github.com/lingyi-ling/novel-downloader/blob/main/src/novel_downloader/plugins/sites/fanqienovel/searcher.py)和[已有书源的匿名搜索说明](https://github.com/gs1147/fanqie-booksource/blob/main/搭建指南.md)，并以真实响应验证；不是官方承诺稳定的开放API。当前端点无需签名，因此不移植上游签名、设备注册或正文解密代码。
 
 `source_verification_required`表示响应头要求官方验证；`source_empty_response`表示无验证头的空体；401/403和重定向为`source_access_denied`，429为`source_rate_limited`。其他错误包括`source_timeout`、`source_network_failed`、`source_response_too_large`、`source_request_rejected`、`source_text_obfuscated`、`invalid_source_response`。私用字体字符拒绝展示，不把乱码冒充可读元数据。以上均不当作无结果；只有code=0且结构有效的空列表才表示空结果。
 
@@ -58,15 +66,25 @@ API v1，JSON Lines私有持久会话。请求`{version:1,id:"...",method:"...",
 
 ## 在线详情与目录（官方公开元数据）
 
-`health.capabilities`包含`online_details`。`online.detail {source:"fanqie",book_id}`返回`{job,status:"pending"}`，复用`online.status`及`online.cancel`。搜索与详情共用一个真实在途任务；切换、挂起或退出不派生后续请求，取消后迟到结果不可交付。标识为1–24位ASCII数字字符串，传给固定URL前验证，不接受任意URL。
+`health.capabilities`包含`online_details`。`online.detail {source:<来源ID>,book_id}`返回`{job,status:"pending"}`，复用`online.status`及`online.cancel`。搜索与详情共用一个真实在途任务；切换、挂起或退出不派生后续请求，取消后迟到结果不可交付。番茄/书旗标识为1–24位ASCII数字字符串，七猫另允许一个由下划线分隔的数字后缀；传给固定URL前验证，不接受任意URL。
 
-完成结果为`{source:"fanqie",id,title,author,description,chapters:[{id,title}]}`。字段中的ID均为来源ID，不转换成宿主本地书籍ID；详情本身不写书架；用户明确加入时按下节持久化目录快照。只返回白名单元数据，不返回封面、账号、上游签名或网页锁定字段；网页锁定状态不能代替App章节权限。
+完成结果为`{source:<来源ID>,id,title,author,description,chapters:[{id,title}]}`。字段中的ID均为来源ID，不转换成宿主本地书籍ID；详情本身不写书架；用户明确加入时按下节持久化目录快照。只返回白名单元数据，不返回封面、账号、上游签名或网页锁定字段；网页锁定状态不能代替App章节权限。
 
-详情只请求`https://fanqienovel.com/page/<book_id>`官方公开页面。真实验证已读回《惊鸿》的4423章完整目录。使用与搜索相同的NativeTls、系统代理及有界超时；响应上限4MiB。只通过serde_json解析`window.__INITIAL_STATE__`赋值中的第一个JSON值，不执行网页JavaScript或请求其资源。书籍ID必须匹配请求；标题、作者和简介的上限与搜索一致，目录最多10000章，章节ID唯一并保留服务端卷序/章序；实际章数必须等于声明总数。缺失章节返回`incomplete_source_directory`，结构错误或重复ID返回`invalid_source_response`，不能当作空目录。
+番茄详情只请求`https://fanqienovel.com/page/<book_id>`官方公开页面。真实验证已读回《惊鸿》的4423章完整目录。使用与搜索相同的NativeTls、系统代理及有界超时；响应上限4MiB。只通过serde_json解析`window.__INITIAL_STATE__`赋值中的第一个JSON值，不执行网页JavaScript或请求其资源。书籍ID必须匹配请求；标题、作者和简介的上限与搜索一致，目录最多10000章，章节ID唯一并保留服务端卷序/章序；实际章数必须等于声明总数。缺失章节返回`incomplete_source_directory`，结构错误或重复ID返回`invalid_source_response`，不能当作空目录。
 
 宿主在用户明确点击搜索结果的“详情”后请求，不预取其他书籍。目录每页只渲染100章，分页只切本地已验证快照，不联网。返回结果、切换根页面或设置会保留搜索快照及滚动；已载入目录和展示页保留，载入中离开则取消，重新进入只显示保留内容，由用户明确选择“载入目录”再请求。
 
-此能力只提供书籍详情与目录，不表示正文可读。已对旧匿名App目录及首章正文端点各进行一次核验，均为HTTP200空体，未使用账号、设备注册、内容密钥或版本降级；原因未知，不推断为付费、账号限制或服务端封禁。用户确认搜索已可用，正文仍需验证兼容的正常客户端/会话及授权范围；不通过换设备、降级或第三方正文代理补齐。
+目录成功不表示所有章节可读；各来源正文权限在明确打开章节时单独核对，不能以其他书籍或试读内容替代。
+
+## 七猫与书旗的访客来源边界
+
+七猫固定端点为`https://www.qimao.com/api/search/result`、`/api/book-detail/main-info`、`/api/book-detail/intro`、`/api/book/chapter-list`及`/api/book/chapter`（POST表单读取）。结构化响应中的书籍、章节标识须与请求匹配，目录章数与详情声明一致；付费状态先于正文处理，避免把推荐书内容当作当前章节。
+
+书旗固定读取`https://www.shuqi.com/search`和`https://www.shuqi.com/reader`，只解析HTML和`.js-dataChapters`内的JSON，不执行站点脚本。校验书籍ID、readIsOpen、声明总章数、卷序和唯一章节ID。正文只请求固定`https://c13.shuqireader.com/pcapi/chapter/contentfree/`前缀，校验公开目录给出的参数及匹配书籍/章节ID；不持久化或向宿主交付签名参数。正文按官网公开阅读器的ROT13/Base64编码还原后复用既有安全HTML规范化，不导入第三方代码或依赖。
+
+上述网络复用NativeTls、Windows系统可信证书链、环境/系统代理及既有超时，不跟随重定向、不自动重试，不携带账号Cookie。单次搜索最多2MiB、目录页面/元数据最多8MiB，HTML最多50000节点；目录仍最多10000章。元数据组合或正文准备可能顺序执行多个请求，每次有15秒全局上限，取消后不启动下一请求。未结束的请求仍计入全服务唯一在途任务；迟到结果不进入缓存。`source_chapter_locked`表示未向访客免费开放，不请求收费或试读端点；其他验证、访问拒绝、限流及格式错误沿用既有脱敏错误码。
+
+定向检查：`cargo test --locked --lib online`及`cargo test --locked --lib web_sources`。完整0.1.12包验证过七猫《封总，太太想跟你离婚很久了》760章目录、书旗《重生2012：从拿下极品校花开始》1449章目录、各首章、各一章受限拒绝及书架/位置重启恢复；有限样本不外推全书权限与长期稳定性。
 
 ## 边界与错误
 
@@ -84,9 +102,9 @@ EPUB按spine阅读，使用EPUB3导航或EPUB2 NCX标题。只读取受控归档
 
 ## 在线书架
 
-`health.capabilities`包含`online_shelf`。`library.add {source:"fanqie",book_id}` → `{book:<Entry>,duplicate}`，只持久化本应用书架，不写官方账号收藏。新的条目只能来自当前服务已完成、已读回且ID匹配的`online.detail`结果；不接受客户端提交标题、目录、正文或URL。缺少匹配快照返回`source_detail_required`，客户端需重新载入目录。已在书架的相同来源ID直接返回已有条目，不覆盖快照、进度或更新时间；不同来源ID即使同名也分别保存。
+`health.capabilities`包含`online_shelf`。`library.add {source:<来源ID>,book_id}` → `{book:<Entry>,duplicate}`，只持久化本应用书架，不写官方账号收藏。新的条目只能来自当前服务已完成、已读回且ID匹配的`online.detail`结果；不接受客户端提交标题、目录、正文或URL。缺少匹配快照返回`source_detail_required`，客户端需重新载入目录。已在书架的相同来源ID直接返回已有条目，不覆盖快照、进度或更新时间；不同来源ID即使同名也分别保存。
 
-复用现有原子书库提交、最多5000本限制及移除流程。条目source为`{kind:"fanqie",id:<来源书籍ID>,format:"online",encoding:""}`；本地ID由来源类型和来源ID生成稳定哈希。`book.open`返回已保存的简介及完整有序目录，无网络请求；新增`Book.description`为可选字段，旧本地书籍缺省为空。目录章节ID保留来源ID，`blocks:0`表示尚无正文，`catalog-<hash>`仅标识目录快照，不声称是已验证的正文版本。
+复用现有原子书库提交、最多5000本限制及移除流程。条目source为`{kind:<来源ID>,id:<来源书籍ID>,format:"online",encoding:""}`；本地ID由来源类型和来源ID生成稳定哈希。`book.open`返回已保存的简介及完整有序目录，无网络请求；新增`Book.description`为可选字段，旧本地书籍缺省为空。目录章节ID保留来源ID，`blocks:0`表示尚无正文，`catalog-<hash>`仅标识目录快照，不声称是已验证的正文版本。
 
 书架保存不下载正文、不创建空原文件或章节文件。`online_body`能力及按需正文协议见下节；章节未准备时返回`chapter_not_loaded`，不能把空正文冒充读取成功。宿主从在线详情星标加入或移出书架，确认提交后更新星标；支持正文的宿主可从书架条目恢复阅读，也可在在线详情选择章节直接阅读，首次阅读不自动收藏。写入期间禁重复操作，保存失败保留目录和原书架，可由用户明确重试。离页后的写入结果不更新旧视图，再进入时只读核对书架；恢复不会重复提交。
 
@@ -120,7 +138,7 @@ EPUB按spine阅读，使用EPUB3导航或EPUB2 NCX标题。只读取受控归档
 
 ## 按需在线正文
 
-`health.capabilities`包含`online_body`。`online.chapter {book_id:<受管理书籍ID>,chapter_id:<来源章节ID>}`仅接受本应用已保存且目录中存在的番茄章节。已在内存中时直接返回`{status:"complete",result:{book_id,chapter_id,chapter_version,total}}`；否则返回`{job,status:"pending"}`并通过既有`online.status`读回相同result。搜索、详情和正文共用一个实际在途任务；正文准备完成只交付章节元数据，随后复用`chapter.read`、`chapter.find`读取/检索正文块，不一次向界面交付整本书。
+`health.capabilities`包含`online_body`。`online.chapter {book_id:<受管理书籍ID>,chapter_id:<来源章节ID>}`仅接受本应用已保存且目录中存在的受支持来源章节。已在内存中时直接返回`{status:"complete",result:{book_id,chapter_id,chapter_version,total}}`；否则返回`{job,status:"pending"}`并通过既有`online.status`读回相同result。搜索、详情和正文共用一个实际在途任务；正文准备完成只交付章节元数据，随后复用`chapter.read`、`chapter.find`读取/检索正文块，不一次向界面交付整本书。
 
 `chapter.read`对在线章节增加`chapter_version`，本地章节为null。在线`Position`增加可选`chapter_version`，由当前规范化章节块计算SHA256；`content_version`继续表示保存的目录快照，两者不能互相代替。在线进度必须匹配实际已准备的章节版本，旧正文锚点返回`content_version_changed`；宿主重新打开后核对版本，有变化则回到本章开头。字符偏移仍为Unicode标量值，不能按字节或像素存储。旧本地位置无需该字段，保持兼容。
 
@@ -136,7 +154,7 @@ EPUB按spine阅读，使用EPUB3导航或EPUB2 NCX标题。只读取受控归档
 
 ## 书架状态与直接阅读
 
-`health.capabilities`中的`shelf_membership`表示支持独立书架状态。Entry的`in_shelf`持久化；旧索引缺省为true，沿用原书架。`online.open {source:"fanqie",book_id}`与`library.add`复用已验证详情保存逻辑，首次保存不加入书架；再次打开已有条目不改变书架状态。`library.add`和重复导入本地文件会重新加入已移出条目，保留原有进度。`library.favorite`只切换本应用书架状态，不写官方账号收藏；失败不提交内存，重复相同状态不写文件。移出后正文读取和位置保存仍可继续。`library.remove`仍是物理删除副本及记录的显式接口，不用于星标切换。
+`health.capabilities`中的`shelf_membership`表示支持独立书架状态。Entry的`in_shelf`持久化；旧索引缺省为true，沿用原书架。`online.open {source:<来源ID>,book_id}`与`library.add`复用已验证详情保存逻辑，首次保存不加入书架；再次打开已有条目不改变书架状态。`library.add`和重复导入本地文件会重新加入已移出条目，保留原有进度。`library.favorite`只切换本应用书架状态，不写官方账号收藏；失败不提交内存，重复相同状态不写文件。移出后正文读取和位置保存仍可继续。`library.remove`仍是物理删除副本及记录的显式接口，不用于星标切换。
 
 ## 浏览记录
 

@@ -18,7 +18,7 @@ pub struct Search {
 }
 
 fn parameters(args: &Value) -> Result<(String, u64)> {
-    if args["source"] != "fanqie" {
+    if !crate::web_sources::supported(args["source"].as_str().unwrap_or("")) {
         return Err("unsupported_source");
     }
     let query = args["query"].as_str().unwrap_or("").trim();
@@ -38,21 +38,31 @@ fn parameters(args: &Value) -> Result<(String, u64)> {
 impl Search {
     pub fn start(id: u64, args: &Value) -> Result<Self> {
         let (query, cursor) = parameters(args)?;
+        let source = args["source"].as_str().unwrap().to_owned();
         Ok(Self::worker(id, move |cancel| {
-            fetch(&query, cursor, cancel)
+            if source == "fanqie" {
+                fetch(&query, cursor, cancel)
+            } else {
+                crate::web_sources::search(&source, &query, cursor, cancel)
+            }
         }))
     }
     pub fn detail(id: u64, args: &Value) -> Result<Self> {
-        if args["source"] != "fanqie" {
+        if !crate::web_sources::supported(args["source"].as_str().unwrap_or("")) {
             return Err("unsupported_source");
         }
+        let source = args["source"].as_str().unwrap().to_owned();
         let book_id = args["book_id"]
             .as_str()
-            .filter(|id| valid_id(id))
+            .filter(|id| crate::web_sources::valid_book(&source, id))
             .ok_or("invalid_source_book")?
             .to_owned();
         Ok(Self::worker(id, move |cancel| {
-            fetch_detail(&book_id, cancel)
+            if source == "fanqie" {
+                fetch_detail(&book_id, cancel)
+            } else {
+                crate::web_sources::detail(&source, &book_id, cancel)
+            }
         }))
     }
     pub(crate) fn worker(
@@ -72,11 +82,11 @@ impl Search {
     pub fn running(&self) -> bool {
         self.worker.as_ref().is_some_and(|w| !w.is_finished())
     }
-    pub fn detail_result(&self, book_id: &str) -> Result<Value> {
+    pub fn detail_result(&self, source: &str, book_id: &str) -> Result<Value> {
         self.result
             .as_ref()
             .and_then(|r| r.as_ref().ok())
-            .filter(|v| v["source"] == "fanqie" && v["id"] == book_id && v["chapters"].is_array())
+            .filter(|v| v["source"] == source && v["id"] == book_id && v["chapters"].is_array())
             .cloned()
             .ok_or("source_detail_required")
     }
@@ -108,7 +118,7 @@ impl Drop for Search {
     }
 }
 
-fn network_error(error: ureq::Error) -> &'static str {
+pub(crate) fn network_error(error: ureq::Error) -> &'static str {
     match error {
         ureq::Error::StatusCode(401 | 403) => "source_access_denied",
         ureq::Error::StatusCode(429) => "source_rate_limited",
@@ -119,13 +129,14 @@ fn network_error(error: ureq::Error) -> &'static str {
     }
 }
 
-fn agent() -> ureq::Agent {
+pub(crate) fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .https_only(true)
         .max_redirects(0)
         .tls_config(
             ureq::tls::TlsConfig::builder()
                 .provider(ureq::tls::TlsProvider::NativeTls)
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
                 .build(),
         )
         .timeout_connect(Some(Duration::from_secs(8)))
@@ -155,7 +166,7 @@ fn fetch(query: &str, cursor: u64, cancel: &AtomicBool) -> Result<Value> {
     decode(&read_response(response, 1024 * 1024, cancel)?, cursor)
 }
 
-fn read_response(
+pub(crate) fn read_response(
     mut response: ureq::http::Response<ureq::Body>,
     limit: u64,
     cancel: &AtomicBool,
@@ -259,7 +270,7 @@ fn detail(bytes: &[u8], book_id: &str) -> Result<Value> {
     )
 }
 
-fn text<'a>(item: &'a Value, key: &str, max: usize) -> Result<&'a str> {
+pub(crate) fn text<'a>(item: &'a Value, key: &str, max: usize) -> Result<&'a str> {
     let value = item[key]
         .as_str()
         .filter(|s| s.chars().count() <= max)
@@ -318,6 +329,65 @@ fn decode(bytes: &[u8], cursor: u64) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn same_book_ids_from_different_sources_keep_shelves_and_positions_separate() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tmp")
+            .join(format!("sources-test-{}", std::process::id()));
+        let mut engine = crate::Engine::open(root.clone()).unwrap();
+        let mut ids = std::collections::BTreeSet::new();
+        for source in ["fanqie", "qimao", "shuqi"] {
+            let detail = json!({"source":source,"id":"123","title":"同名书","author":"作者","description":"","chapters":[{"id":"456","title":"第一章"}]});
+            engine.search = Some(Search {
+                id: 1,
+                cancel: Arc::new(AtomicBool::new(false)),
+                worker: None,
+                result: Some(Ok(detail)),
+            });
+            let other = if source == "fanqie" {
+                "qimao"
+            } else {
+                "fanqie"
+            };
+            if engine
+                .library
+                .entries
+                .iter()
+                .all(|e| e.source.kind != other)
+            {
+                assert_eq!(
+                    engine.call("library.add", json!({"source":other,"book_id":"123"})),
+                    Err("source_detail_required")
+                );
+            }
+            let entry = engine
+                .call("library.add", json!({"source":source,"book_id":"123"}))
+                .unwrap()["book"]
+                .clone();
+            let id = entry["id"].as_str().unwrap();
+            assert!(ids.insert(id.to_owned()));
+            engine.body.remember(json!({"book_id":id,"chapter_id":"456","chapter_version":"v1","blocks":crate::parse::online_html("<p>正文</p>").unwrap()})).unwrap();
+            assert_eq!(
+                engine
+                    .call("chapter.read", json!({"book_id":id,"chapter_id":"456"}))
+                    .unwrap()["blocks"][0]["text"],
+                "正文"
+            );
+            engine.call("progress.save",json!({"revision":1,"position":{"book_id":id,"content_version":entry["content_version"],"chapter_id":"456","chapter_version":"v1","block_id":"b0","offset":1}})).unwrap();
+        }
+        drop(engine);
+        let engine = crate::Engine::open(root.clone()).unwrap();
+        assert_eq!(engine.library.entries.len(), 3);
+        assert!(
+            engine
+                .library
+                .entries
+                .iter()
+                .all(|e| e.position.as_ref().unwrap().offset == 1)
+        );
+        drop(engine);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     fn detail_page(page: Value) -> Vec<u8> {
         format!(
             "<script>window.__INITIAL_STATE__ = {};window.untrustedScript();</script>",
@@ -529,7 +599,10 @@ mod tests {
         };
         search.cancel();
         assert!(search.running());
-        assert_eq!(search.detail_result("123"), Err("source_detail_required"));
+        assert_eq!(
+            search.detail_result("fanqie", "123"),
+            Err("source_detail_required")
+        );
         assert_eq!(search.status()["status"], "cancelled");
         release.send(()).unwrap();
         search.worker.take().unwrap().join().unwrap().unwrap();

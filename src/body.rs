@@ -43,9 +43,25 @@ impl Body {
         }
         Ok(meta)
     }
-    pub fn start(&self, id: u64, book: String, source: String, chapter: String) -> Search {
+    pub fn start(
+        &self,
+        id: u64,
+        book: String,
+        kind: String,
+        source: String,
+        chapter: String,
+    ) -> Search {
         let slot = self.helper.clone();
         Search::worker(id, move |cancel| {
+            if kind != "fanqie" {
+                let content = crate::web_sources::chapter(&kind, &source, &chapter, cancel)?;
+                let blocks = crate::parse::online_html(&content)?;
+                let version =
+                    hash(&serde_json::to_vec(&blocks).map_err(|_| "source_decode_failed")?);
+                return Ok(
+                    json!({"book_id":book,"chapter_id":chapter,"chapter_version":version,"blocks":blocks}),
+                );
+            }
             let mut helper = slot.lock().map_err(|_| "source_runtime_failed")?;
             if cancel.load(Ordering::Acquire) {
                 return Err("cancelled");

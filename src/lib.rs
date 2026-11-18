@@ -3,6 +3,7 @@ mod job;
 pub mod model;
 mod online;
 pub mod parse;
+mod web_sources;
 use model::*;
 use serde_json::{Value, json};
 use std::{
@@ -117,7 +118,7 @@ impl Engine {
         read_json(&self.directory(id)?.join("book.json"), 4 * 1024 * 1024)
     }
     fn chapter_meta<'a>(&self, book: &'a Book, chapter: &str) -> Result<&'a Chapter> {
-        if book.source.kind == "fanqie" {
+        if book.source.format == "online" {
             return book
                 .chapters
                 .iter()
@@ -131,7 +132,7 @@ impl Engine {
             .ok_or("chapter_not_found")
     }
     fn page(&self, book: &Book, chapter: &str, start: usize) -> Result<Vec<Block>> {
-        if book.source.kind == "fanqie" {
+        if book.source.format == "online" {
             let body = self.body.chapter(&book.id, chapter)?;
             if start >= body.blocks.len() || start % PAGE_BLOCKS != 0 {
                 return Err("invalid_position");
@@ -243,10 +244,14 @@ impl Engine {
     }
     fn add_online(&mut self, detail: Value, in_shelf: bool) -> Result<Value> {
         // This snapshot comes only from the completed, validated source worker.
+        let source = detail["source"]
+            .as_str()
+            .filter(|s| web_sources::supported(s))
+            .ok_or("unsupported_source")?;
         let source_id = detail["id"].as_str().ok_or("invalid_source_response")?;
         let id = format!(
             "book-{}",
-            &hash(format!("fanqie:{source_id}").as_bytes())[..24]
+            &hash(format!("{source}:{source_id}").as_bytes())[..24]
         );
         let chapters = detail["chapters"]
             .as_array()
@@ -275,7 +280,7 @@ impl Engine {
             author: detail["author"].as_str().unwrap_or("").to_owned(),
             description: detail["description"].as_str().unwrap_or("").to_owned(),
             source: Source {
-                kind: "fanqie".into(),
+                kind: source.into(),
                 id: source_id.into(),
                 format: "online".into(),
                 encoding: String::new(),
@@ -308,7 +313,7 @@ impl Engine {
                     return Err("search_busy");
                 }
                 let book = self.book(string(&args, "book_id")?)?;
-                if book.source.kind != "fanqie" {
+                if !web_sources::supported(&book.source.kind) {
                     return Err("unsupported_source");
                 }
                 let chapter = string(&args, "chapter_id")?;
@@ -322,6 +327,7 @@ impl Engine {
                 self.search = Some(self.body.start(
                     self.next_job,
                     book.id,
+                    book.source.kind,
                     book.source.id,
                     chapter.to_owned(),
                 ));
@@ -335,7 +341,8 @@ impl Engine {
             }
             "library.add" | "online.open" => {
                 let in_shelf = method == "library.add";
-                if args["source"] != "fanqie" {
+                let source = string(&args, "source")?;
+                if !web_sources::supported(source) {
                     return Err("unsupported_source");
                 }
                 let source_id = string(&args, "book_id")?;
@@ -343,7 +350,7 @@ impl Engine {
                     .library
                     .entries
                     .iter()
-                    .find(|e| e.source.kind == "fanqie" && e.source.id == source_id)
+                    .find(|e| e.source.kind == source && e.source.id == source_id)
                 {
                     if in_shelf && !existing.in_shelf {
                         let id = existing.id.clone();
@@ -357,7 +364,7 @@ impl Engine {
                     .search
                     .as_ref()
                     .ok_or("source_detail_required")?
-                    .detail_result(source_id)?;
+                    .detail_result(source, source_id)?;
                 self.add_online(detail, in_shelf)
             }
             "online.search" | "online.detail" => {
@@ -409,7 +416,7 @@ impl Engine {
                 Ok(json!({}))
             }
             "health" => Ok(
-                json!({"service":"reader","api_version":1,"capabilities":["local_import","chapters","progress","chapter_search","online_search","online_details","online_shelf","online_body","shelf_membership","browsing_history"]}),
+                json!({"service":"reader","api_version":1,"sources":["fanqie","qimao","shuqi"],"capabilities":["local_import","chapters","progress","chapter_search","online_search","online_details","online_shelf","online_body","shelf_membership","browsing_history"]}),
             ),
             "library.list" => {
                 let start = args["start"].as_u64().unwrap_or(0) as usize;
@@ -550,12 +557,12 @@ impl Engine {
                 let chapter = string(&args, "chapter_id")?;
                 let start = args["start"].as_u64().unwrap_or(0) as usize;
                 let blocks = self.page(&book, chapter, start)?;
-                let total = if book.source.kind == "fanqie" {
+                let total = if book.source.format == "online" {
                     self.body.chapter(&book.id, chapter)?.blocks.len()
                 } else {
                     self.chapter_meta(&book, chapter)?.blocks
                 };
-                let version = if book.source.kind == "fanqie" {
+                let version = if book.source.format == "online" {
                     Some(
                         self.body
                             .chapter(&book.id, chapter)?
@@ -575,7 +582,7 @@ impl Engine {
                     return Err("query_too_large");
                 }
                 let start = args["start"].as_u64().unwrap_or(0) as usize;
-                let total = if book.source.kind == "fanqie" {
+                let total = if book.source.format == "online" {
                     self.body.chapter(&book.id, chapter)?.blocks.len()
                 } else {
                     self.chapter_meta(&book, chapter)?.blocks
@@ -621,7 +628,7 @@ impl Engine {
                 if position.content_version != book.content_version {
                     return Err("content_version_changed");
                 }
-                if book.source.kind == "fanqie"
+                if book.source.format == "online"
                     && position.chapter_version.as_deref()
                         != Some(
                             self.body
