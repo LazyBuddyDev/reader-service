@@ -1,4 +1,5 @@
 mod qimao;
+mod shuqi;
 mod vault;
 use md5::{Digest, Md5};
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value as LuaValue};
@@ -344,6 +345,11 @@ fn main() {
             break;
         };
         let result = if request["method"]
+            .as_str()
+            .is_some_and(|m| matches!(m, "shuqi.search" | "shuqi.detail" | "shuqi.chapter"))
+        {
+            shuqi::request(&request)
+        } else if request["method"]
             .as_str()
             .is_some_and(|m| matches!(m, "qimao.search" | "qimao.detail" | "qimao.chapter"))
         {

@@ -11,7 +11,7 @@ use std::{
 };
 
 pub(crate) fn supported(source: &str) -> bool {
-    matches!(source, "fanqie" | "qimao")
+    matches!(source, "fanqie" | "qimao" | "midu" | "shuqi_app")
 }
 
 pub struct Search {
@@ -335,7 +335,11 @@ mod tests {
             .join(format!("sources-test-{}", std::process::id()));
         let mut engine = crate::Engine::open(root.clone()).unwrap();
         let mut ids = std::collections::BTreeSet::new();
-        for source in ["fanqie", "qimao"] {
+        assert!(
+            !supported("shuqi"),
+            "legacy web trial identity must not become App identity"
+        );
+        for source in ["fanqie", "qimao", "midu", "shuqi_app"] {
             let detail = json!({"source":source,"id":"123","title":"同名书","author":"作者","description":"","chapters":[{"id":"456","title":"第一章"}]});
             engine.search = Some(Search {
                 id: 1,
@@ -376,7 +380,7 @@ mod tests {
         }
         drop(engine);
         let engine = crate::Engine::open(root.clone()).unwrap();
-        assert_eq!(engine.library.entries.len(), 2);
+        assert_eq!(engine.library.entries.len(), 4);
         assert!(
             engine
                 .library

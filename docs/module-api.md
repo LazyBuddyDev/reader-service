@@ -45,7 +45,7 @@ API v1，JSON Lines私有持久会话。请求`{version:1,id:"...",method:"...",
 
 ## 在线搜索
 
-`health.capabilities`包含`online_search`，`health.sources`给出可用来源，`health.source_channels`给出实际正文接入端。当前支持番茄App及七猫App的免费小说链路，不增加Python或浏览器运行时。宿主需要七猫显式声明`source_channels.qimao:"app"`才显示对应入口；旧服务没有接入端声明时只保留此前已验证的番茄入口，不把0.1.12的网页试读接口显示为App来源。
+`health.capabilities`包含`online_search`，`health.sources`给出可用来源，`health.source_channels`给出实际正文接入端。当前支持番茄App、七猫App、米读App及书旗App免费库，不增加Python或浏览器运行时。除已验证的原始番茄入口外，宿主要求新来源显式声明对应`source_channels:<来源>:"app"`才显示；旧服务没有接入端声明时不把网页试读接口显示为App来源。
 
 接入端的能力与权限分别核对，遵循[宿主模块契约](https://github.com/LazyBuddyDev/LazyBuddy/blob/main/docs/module-api.md#json-lines)。网页的VIP/试读标记不能推定App收费，App免费也不能使网页接口自动获得全本能力；正文成功必须来自实际采用的端。同一书籍的ID/目录是否一致另行验证，不凭同名跨端拼接。
 
@@ -53,8 +53,24 @@ API v1，JSON Lines私有持久会话。请求`{version:1,id:"...",method:"...",
 | --- | --- | --- |
 | `fanqie` | App搜索、官网公开目录、独立App正文辅助程序 | 目录与正文权限分别验证，沿用固定SDK |
 | `qimao` | App搜索、App详情/完整目录、App正文 | 已验证普通文本阅读器type 0，无账号Token或购买请求；不使用网页VIP标记限制App章节 |
+| `midu` | App搜索/详情/目录指针、官方CDN完整目录及分段正文 | 仅保留App声明免费、非限时且目录无章节费用的普通文本；不接受其他CDN或回退地址 |
+| `shuqi_app` | App搜索/详情、官方移动目录身份/章序、App正文 | App自身排除VIP/优先付费阅读，每章须有App免费授权；移动网页权限不参与App判定 |
 
-七猫只显示已验证的普通文本阅读类型，音频及其他阅读类型尚不接入。书旗此前只有网页访客部分章节，尚未验证App全本链路，当前不再提供搜索/新入架入口；旧书架与进度不删除，旧记录显示“网页试读”，正文请求明确返回不支持。来源之间不聚合、不按同名合并，也不做换源映射。
+### 新增免费来源的协议与边界
+
+米读固定使用`https://api.midureader.com/fiction/`的`search/searchV2`、`book/getDetail`、`book/getChaptersCdn`，POST表单`app=midu`及所需关键词/页码/书籍ID，无账号、Cookie或设备标识。作品ID为32位小写十六进制，章节ID仍为1–24位数字字符串，不能套用其他来源的书籍ID校验。搜索cursor为从0开始的App页码，每页原始结果10条；跳过非书籍结果和未声明免费的作品，过滤后为空不代表后续无页。
+
+详情与读取重新核对`free_type=1`、`free_dead_line=0`、`free_expiration_sec=0`及App目录指针`freeChapterCount=-1`。目录URL只能是`https://book.midureader.com/book/chapter_list/100/<book_id>/<32位小写hex>.txt`，不请求返回的备用域名。完整数组不超过10000章，逐项核对bookId、唯一chapterId、从1连续的no、标题和content_md5路径片段，所有price/coin_amount均须为0；此链路中isFree实际为字符串0，不能反向解读成锁定。该目录接口没有独立总章数字段，使用App声明的完整版本目录及连续章序，不能仅凭此证明未来目录不再更新。正文只请求同一固定CDN的`chapter/segment/master/<book>/<chapter>/<content_md5>.txt`，读取content段数组后将文字转为惰性段落，不执行HTML；最多4096段、解码正文1MiB。content_md5只作为已验证路径片段，不声称是解码文字的校验和。实现独立于宿主和GPL辅助程序，无新运行时。
+
+书旗固定使用`https://ocean.shuqireader.com`的`/sqan/render/render/search/native_v3`、`/sqan/sqapi/bff/api/v1/reader/titlepage`和`/sqan/sqapi/bff/api/v1/reader/chapterinfo`。固定普通App画像12.7.0.268/261013，只用官方移动阅读器确认的匿名访客哨兵8000000；设备标识留空，不带会员utype，不借用上游代码中的其他user ID或设备，不模拟广告/任务或购买。独立GPL辅助程序处理网关签名/编码，许可及对应源码随包，来源见其README。
+
+App原生搜索的page是固定模块名searchResultV3，不是页码。cursor是原始候选偏移，每次至多核对3个候选的App详情；过滤后可以为空且仍有next_cursor，不能伪造末页。只接收App元数据明确`showVipTag:false`、`isVipPriorityRead:false`及formats=1的作品，未知类型不接入。详情从官方`openapi/book/chapterlist`取完整章序/标识，核对bookId、chapterNum及App的chapterTotalNum，不使用该网页接口的免费、价格或VIP字段限制App读取。每次正文重新核对App详情、目录成员和App返回的chapterId，须有App的`isFreeRead:true`，再严格ROT13→Base64→UTF-8解码；App返回HTTP200但只有试读且免费授权为false时仍拒绝。无未签CDN探测、换身份、HTTP降级或另一端回退。
+
+`shuqi_app`是独立来源身份，旧`shuqi`网页试读书架/位置保留，不自动改成App记录或复用进度。界面显示“书旗免费库（App）”，明确接入的是已验证免费作品范围，不宣称书旗所有作品全本免费。单章实际免费授权变化仍须明确失败。
+
+上述请求复用NativeTls、OS信任根、系统代理、拒绝重定向及8秒连接/5秒读取/每次请求15秒上限；网络响应最多4MiB，按顺序执行，阶段间检查取消。米读一个章节最多4次上游读取；书旗搜索最多4次、详情2次、章节3次。米读阻塞I/O取消至多等待当前单次上限，书旗复用辅助程序Job取消及65秒整项请求期限；取消后不派生下一阶段、迟到结果不可交付。元数据、解码内容及权限均按实际采用端验证，未逐章下载，不能从分布抽样宣称全站永久可用。
+
+各来源只显示已验证的普通文本阅读类型，音频及其他阅读类型尚不接入。旧书旗网页试读来源`shuqi`不提供搜索/新入架，已有记录仍显示“网页试读”，正文明确返回不支持；新App免费库使用独立`shuqi_app`身份。来源之间不聚合、不按同名合并，也不做换源映射。
 
 | 方法 | 参数与结果 |
 | --- | --- |
@@ -74,7 +90,7 @@ API v1，JSON Lines私有持久会话。请求`{version:1,id:"...",method:"...",
 
 ## 在线详情与目录（官方公开元数据）
 
-`health.capabilities`包含`online_details`。`online.detail {source:<来源ID>,book_id}`返回`{job,status:"pending"}`，复用`online.status`及`online.cancel`。搜索与详情共用一个真实在途任务；切换、挂起或退出不派生后续请求，取消后迟到结果不可交付。来源书籍与章节标识均为1–24位ASCII数字字符串；传给固定URL前验证，不接受任意URL。
+`health.capabilities`包含`online_details`。`online.detail {source:<来源ID>,book_id}`返回`{job,status:"pending"}`，复用`online.status`及`online.cancel`。搜索与详情共用一个真实在途任务；切换、挂起或退出不派生后续请求，取消后迟到结果不可交付。米读书籍ID为32位小写hex，其他来源书籍ID及所有来源章节ID为1–24位ASCII数字字符串；按来源验证后传给固定URL，不接受任意URL。
 
 完成结果为`{source:<来源ID>,id,title,author,description,chapters:[{id,title}]}`。字段中的ID均为来源ID，不转换成宿主本地书籍ID；详情本身不写书架；用户明确加入时按下节持久化目录快照。只返回白名单元数据，不返回封面、账号、上游签名或网页锁定字段；网页锁定状态不能代替App章节权限。
 

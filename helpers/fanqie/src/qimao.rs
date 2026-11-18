@@ -20,15 +20,8 @@ fn sign(fields: &BTreeMap<&str, String>) -> String {
     value.push_str(SIGN_KEY);
     format!("{:x}", Md5::digest(value.as_bytes()))
 }
-fn fetch(endpoint: &str, fields: &[(&str, String)]) -> Result<Value> {
-    let url = match endpoint {
-        "search" => "https://api-bc.wtzw.com/search/v1/words",
-        "detail" => "https://api-bc.wtzw.com/api/v1/reader/detail",
-        "catalog" => "https://api-ks.wtzw.com/api/v1/chapter/chapter-list",
-        "chapter" => "https://api-ks.wtzw.com/api/v1/chapter/content",
-        _ => return Err("invalid_arguments"),
-    };
-    let agent = ureq::Agent::config_builder()
+pub(crate) fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
         .https_only(true)
         .max_redirects(0)
         .tls_config(
@@ -41,7 +34,17 @@ fn fetch(endpoint: &str, fields: &[(&str, String)]) -> Result<Value> {
         .timeout_per_read(Some(Duration::from_secs(5)))
         .timeout_global(Some(Duration::from_secs(15)))
         .build()
-        .new_agent();
+        .new_agent()
+}
+fn fetch(endpoint: &str, fields: &[(&str, String)]) -> Result<Value> {
+    let url = match endpoint {
+        "search" => "https://api-bc.wtzw.com/search/v1/words",
+        "detail" => "https://api-bc.wtzw.com/api/v1/reader/detail",
+        "catalog" => "https://api-ks.wtzw.com/api/v1/chapter/chapter-list",
+        "chapter" => "https://api-ks.wtzw.com/api/v1/chapter/content",
+        _ => return Err("invalid_arguments"),
+    };
+    let agent = agent();
     let headers = BTreeMap::from([
         ("AUTHORIZATION", String::new()),
         ("app-version", "73720".into()),
@@ -83,7 +86,7 @@ fn fetch(endpoint: &str, fields: &[(&str, String)]) -> Result<Value> {
     }
     Ok(value["data"].clone())
 }
-fn network_error(error: ureq::Error) -> &'static str {
+pub(crate) fn network_error(error: ureq::Error) -> &'static str {
     match error {
         ureq::Error::StatusCode(401 | 403) | ureq::Error::TooManyRedirects => {
             "source_access_denied"

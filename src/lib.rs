@@ -1,5 +1,6 @@
 mod body;
 mod job;
+mod midu;
 pub mod model;
 mod online;
 pub mod parse;
@@ -371,7 +372,9 @@ impl Engine {
                     return Err("search_busy");
                 }
                 let id = self.next_job + 1;
-                let search = if args["source"] == "qimao" {
+                let search = if args["source"] == "midu" {
+                    midu::start(id, method, &args)?
+                } else if args["source"] == "qimao" || args["source"] == "shuqi_app" {
                     self.body.source(id, method, &args)?
                 } else if method == "online.detail" {
                     online::Search::detail(id, &args)?
@@ -417,7 +420,7 @@ impl Engine {
                 Ok(json!({}))
             }
             "health" => Ok(
-                json!({"service":"reader","api_version":1,"sources":["fanqie","qimao"],"source_channels":{"fanqie":"app","qimao":"app"},"capabilities":["local_import","chapters","progress","chapter_search","online_search","online_details","online_shelf","online_body","shelf_membership","browsing_history"]}),
+                json!({"service":"reader","api_version":1,"sources":["fanqie","qimao","midu","shuqi_app"],"source_channels":{"fanqie":"app","qimao":"app","midu":"app","shuqi_app":"app"},"capabilities":["local_import","chapters","progress","chapter_search","online_search","online_details","online_shelf","online_body","shelf_membership","browsing_history"]}),
             ),
             "library.list" => {
                 let start = args["start"].as_u64().unwrap_or(0) as usize;

@@ -44,15 +44,20 @@ impl Body {
         Ok(meta)
     }
     pub fn source(&self, id: u64, method: &str, args: &Value) -> Result<Search> {
+        let prefix = match args["source"].as_str() {
+            Some("qimao") => "qimao",
+            Some("shuqi_app") => "shuqi",
+            _ => return Err("unsupported_source"),
+        };
         let request = if method == "online.search" {
             let (query, cursor) = crate::online::parameters(args)?;
-            json!({"method":"qimao.search","query":query,"cursor":cursor})
+            json!({"method":format!("{prefix}.search"),"query":query,"cursor":cursor})
         } else {
             let book = args["book_id"]
                 .as_str()
                 .filter(|s| crate::online::valid_id(s))
                 .ok_or("invalid_source_book")?;
-            json!({"method":"qimao.detail","book_id":book})
+            json!({"method":format!("{prefix}.detail"),"book_id":book})
         };
         let slot = self.helper.clone();
         Ok(Search::worker(id, move |cancel| {
@@ -69,11 +74,15 @@ impl Body {
     ) -> Search {
         let slot = self.helper.clone();
         Search::worker(id, move |cancel| {
-            let reply = helper_request(
-                &slot,
-                &json!({"method":if kind=="qimao"{"qimao.chapter"}else{"chapter"},"book_id":source,"chapter_id":chapter}),
-                cancel,
-            )?;
+            let reply = if kind == "midu" {
+                serde_json::json!({"content":crate::midu::chapter(&source,&chapter,cancel)?})
+            } else {
+                helper_request(
+                    &slot,
+                    &json!({"method":match kind.as_str(){"qimao"=>"qimao.chapter","shuqi_app"=>"shuqi.chapter",_=>"chapter"},"book_id":source,"chapter_id":chapter}),
+                    cancel,
+                )?
+            };
             if cancel.load(Ordering::Acquire) {
                 return Err("cancelled");
             }
@@ -117,6 +126,9 @@ fn helper_error(code: &str) -> &'static str {
         "source_body_unavailable" => "source_body_unavailable",
         "source_request_rejected" => "source_request_rejected",
         "source_empty_chapter" => "source_empty_chapter",
+        "source_chapter_locked" => "source_chapter_locked",
+        "unsupported_source_book" => "unsupported_source_book",
+        "source_request_too_large" => "invalid_search_query",
         "incomplete_source_directory" => "incomplete_source_directory",
         "invalid_search_cursor" => "invalid_search_cursor",
         "invalid_search_query" => "invalid_search_query",
@@ -241,6 +253,21 @@ mod tests {
             .unwrap();
         assert_eq!(body.cache.len(), 3);
         assert_eq!(body.chapter("b", "2").unwrap().chapter_version, "v2");
+    }
+    #[test]
+    fn native_permission_failures_are_not_reported_as_decode_errors() {
+        assert_eq!(
+            helper_error("source_chapter_locked"),
+            "source_chapter_locked"
+        );
+        assert_eq!(
+            helper_error("unsupported_source_book"),
+            "unsupported_source_book"
+        );
+        assert_eq!(
+            helper_error("upstream private details"),
+            "source_decode_failed"
+        );
     }
     #[test]
     fn cancellation_terminates_the_owned_helper_job() {
